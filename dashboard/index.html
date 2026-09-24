@@ -99,7 +99,7 @@
       <section class="card panel"><div class="panel-head"><h2>Release period ranking</h2><button id="download" class="export" type="button">Download CSV</button></div><div class="table-wrap"><table id="movies-table"></table></div></section>
       <section class="card panel"><div class="panel-head"><h2>Distributor ranking</h2><span>Selected period</span></div><div class="table-wrap"><table id="distributors-table"></table></div></section>
     </div>
-    <section class="card panel"><div class="panel-head"><h2>Movie match review</h2><button id="refresh-review" class="export" type="button">Refresh cases</button></div><p class="note" id="review-count">Ambiguous matches and titles with multiple revenue periods.</p><div class="table-wrap"><table id="review-table"></table></div></section>
+    <details class="card panel"><summary>Movie match review (optional)</summary><p class="note" id="review-count">Ambiguous matches and titles with multiple revenue periods.</p><div class="table-wrap"><table id="review-table"></table></div></details>
     <footer>Movie identity is provisional until OMDb matching is reviewed. A source title can refer to a remake or rerelease. Theater counts are not summed as unique cinemas.</footer>
   </div>
   <script>
@@ -228,9 +228,10 @@
         $('movies-count').textContent = fmt(data.selected.movies);
         $('days').textContent = fmt(data.selected.days);
         $('coverage').textContent = `${(data.coverage*100).toFixed(1)}%`;
-        $('notice').textContent = $('genre').value
-          ? `Genre results include only OMDb-matched movies. They cover ${(data.coverage*100).toFixed(1)}% of revenue for these dates and distributor.`
-          : '';
+        const counts = Object.fromEntries(data.enrichment.map(row => [row.status, row.periods]));
+        const processed = data.enrichment.reduce((sum, row) => sum + (row.status === 'pending' ? 0 : row.periods), 0);
+        const periods = data.enrichment.reduce((sum, row) => sum + row.periods, 0);
+        $('notice').textContent = `OMDb processing for selected dates and distributor: ${fmt(processed)} / ${fmt(periods)} periods; ${fmt(counts.matched)} matched, ${fmt(counts.ambiguous)} ambiguous, ${fmt(counts.not_found)} not found, ${fmt(counts.pending)} pending. Matched periods account for ${(data.coverage*100).toFixed(1)}% of revenue.${$('genre').value ? ' Genre results include only matched movies.' : ''}`;
         renderBars(data.movies);
         renderTrend(data.trend);
         renderTable('films-table', [
@@ -253,7 +254,6 @@
     }
 
     $('filters').addEventListener('submit', event => { event.preventDefault(); refresh(); });
-    $('refresh-review').addEventListener('click', () => loadReview().catch(error => { $('error').textContent = error.message; }));
     function downloadCsv(filename, rows, columns) {
       if (!rows.length) return;
       const quote = value => `"${String(value ?? '').replaceAll('"','""')}"`;
@@ -277,7 +277,9 @@
         meta.distributors.forEach(value => appendOption($('distributor'),value));
         meta.genres.forEach(value => appendOption($('genre'),value));
         await refresh();
-        await loadReview();
+        document.querySelector('details').addEventListener('toggle', event => {
+          if (event.target.open) loadReview().catch(error => { $('error').textContent = error.message; });
+        });
       } catch (error) { $('error').textContent = error.message; }
     })();
   </script>

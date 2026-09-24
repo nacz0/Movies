@@ -86,6 +86,28 @@ def overview(
     return dict(zip(("revenue", "matched_revenue", "movies", "days"), row))
 
 
+def enrichment_status(
+    con: duckdb.DuckDBPyConnection,
+    start: date,
+    end: date,
+    distributors: list[str] | None = None,
+) -> list[dict]:
+    """Period and revenue coverage for the selected dates and distributors."""
+    where, parameters = filters(start, end, distributors)
+    return _records(con.execute(f"""
+        SELECT m.match_status AS status,
+               COUNT(DISTINCT m.movie_key) AS periods,
+               SUM(f.revenue) AS revenue
+        FROM fact_daily_revenue f
+        JOIN dim_date d ON d.date_key = f.date_key
+        JOIN dim_movie m ON m.movie_key = f.movie_key
+        JOIN dim_distributor x ON x.distributor_key = f.distributor_key
+        WHERE {where}
+        GROUP BY m.match_status
+        ORDER BY m.match_status
+    """, parameters))
+
+
 def movie_ranking(
     con: duckdb.DuckDBPyConnection,
     start: date,
