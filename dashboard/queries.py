@@ -46,21 +46,6 @@ def genre_options(con: duckdb.DuckDBPyConnection) -> list[str]:
     ).fetchall()]
 
 
-def review_cases(con: duckdb.DuckDBPyConnection, limit: int = 50) -> dict:
-    if limit < 1 or limit > 500:
-        raise ValueError("limit must be between 1 and 500")
-    rows = _records(con.execute("""
-        SELECT * FROM v_movie_match_review
-        ORDER BY CASE WHEN match_status = 'ambiguous' THEN 0
-                      WHEN match_status IN ('verified_id', 'rejected') THEN 1
-                      ELSE 2 END,
-                 total_revenue DESC, source_title, run_start_date
-        LIMIT ?
-    """, [limit]))
-    total = con.execute("SELECT COUNT(*) FROM v_movie_match_review").fetchone()[0]
-    return {"total": total, "cases": rows}
-
-
 def overview(
     con: duckdb.DuckDBPyConnection,
     start: date,
@@ -121,7 +106,7 @@ def movie_ranking(
     where, parameters = filters(start, end, distributors, genre)
     return _records(con.execute(
         f"""
-        SELECT r.display_title AS movie,
+        SELECT m.display_title AS movie,
                SUM(f.revenue) AS revenue,
                COUNT(*) AS reported_days,
                m.primary_genre AS genre,
@@ -130,10 +115,9 @@ def movie_ranking(
         FROM fact_daily_revenue f
         JOIN dim_date d ON d.date_key = f.date_key
         JOIN dim_movie m ON m.movie_key = f.movie_key
-        JOIN dim_release_run r ON r.movie_key = m.movie_key
         JOIN dim_distributor x ON x.distributor_key = f.distributor_key
         WHERE {where}
-        GROUP BY m.movie_key, r.display_title, m.primary_genre,
+        GROUP BY m.movie_key, m.display_title, m.primary_genre,
                  m.imdb_rating, m.match_status
         ORDER BY revenue DESC, movie
         LIMIT ?
@@ -150,32 +134,28 @@ def film_ranking(
     genre: str | None = None,
     limit: int = 20,
 ) -> list[dict]:
-    """Rank confirmed productions, combining every linked revenue period."""
+    """Rank matched IMDb IDs, combining their reporting periods."""
     if limit < 1 or limit > 100:
         raise ValueError("limit must be between 1 and 100")
     where, parameters = filters(start, end, distributors)
     if genre:
-        where += " AND fd.primary_genre = ?"
+        where += " AND m.primary_genre = ?"
         parameters.append(genre)
     return _records(con.execute(f"""
-        SELECT fd.film_title || COALESCE(' (' || CAST(fd.release_year AS VARCHAR) || ')', '')
+        SELECT max(m.omdb_title) || COALESCE(' (' || CAST(max(m.release_year) AS VARCHAR) || ')', '')
                    AS film,
-               film.imdb_id, fd.release_year,
+               m.imdb_id, max(m.release_year) AS release_year,
                SUM(f.revenue) AS revenue,
-               COUNT(DISTINCT match.movie_key) AS periods,
+               COUNT(DISTINCT m.movie_key) AS periods,
                COUNT(DISTINCT d.calendar_date) AS reported_days,
-               fd.primary_genre AS genre, fd.imdb_rating
+               max(m.primary_genre) AS genre, max(m.imdb_rating) AS imdb_rating
         FROM fact_daily_revenue f
         JOIN dim_date d ON d.date_key = f.date_key
         JOIN dim_movie m ON m.movie_key = f.movie_key
         JOIN dim_distributor x ON x.distributor_key = f.distributor_key
-        JOIN v_run_film_match match ON match.movie_key = f.movie_key
-        JOIN dim_film film ON film.film_key = match.film_key
-        JOIN film_details fd ON fd.film_key = film.film_key
-        WHERE {where}
-        GROUP BY film.film_key, film.imdb_id, fd.film_title,
-                 fd.release_year, fd.primary_genre, fd.imdb_rating
-        ORDER BY revenue DESC, film.imdb_id
+        WHERE {where} AND m.match_status = 'matched' AND m.imdb_id IS NOT NULL
+        GROUP BY m.imdb_id
+        ORDER BY revenue DESC, m.imdb_id
         LIMIT ?
     """, [*parameters, limit]))
 

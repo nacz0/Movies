@@ -22,7 +22,6 @@ from dashboard.queries import (
     monthly_trend,
     movie_ranking,
     overview,
-    review_cases,
 )
 
 
@@ -62,17 +61,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if url.path == "/favicon.ico":
             self._send(204, b"", "image/x-icon")
             return
-        if url.path not in ("/api/meta", "/api/dashboard", "/api/review"):
+        if url.path not in ("/api/meta", "/api/dashboard"):
             self._json(404, {"error": "Not found"})
             return
 
         try:
             with closing(duckdb.connect(str(self.server.db_path), read_only=True)) as con:
-                if url.path == "/api/review":
-                    query = parse_qs(url.query)
-                    limit = int(query.get("limit", ["50"])[0])
-                    self._json(200, review_cases(con, limit))
-                    return
                 first, last = date_bounds(con)
                 if url.path == "/api/meta":
                     self._json(200, {

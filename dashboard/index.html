@@ -99,8 +99,7 @@
       <section class="card panel"><div class="panel-head"><h2>Release period ranking</h2><button id="download" class="export" type="button">Download CSV</button></div><div class="table-wrap"><table id="movies-table"></table></div></section>
       <section class="card panel"><div class="panel-head"><h2>Distributor ranking</h2><span>Selected period</span></div><div class="table-wrap"><table id="distributors-table"></table></div></section>
     </div>
-    <details class="card panel"><summary>Movie match review (optional)</summary><p class="note" id="review-count">Ambiguous matches and titles with multiple revenue periods.</p><div class="table-wrap"><table id="review-table"></table></div></details>
-    <footer>Movie identity is provisional until OMDb matching is reviewed. A source title can refer to a remake or rerelease. Theater counts are not summed as unique cinemas.</footer>
+    <footer>Title and year matching is only a heuristic. Ambiguous and unmatched periods remain in the release-period ranking. Theater counts are not summed as unique cinemas.</footer>
   </div>
   <script>
     const $ = id => document.getElementById(id);
@@ -192,27 +191,6 @@
       summary.append(first, peak, last);
     }
 
-    async function loadReview() {
-      const response = await fetch('/api/review?limit=50');
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Could not load review cases');
-      $('review-count').textContent = `Showing ${data.cases.length} of ${data.total} cases. Use the movie key when recording a decision.`;
-      renderTable('review-table', [
-        ['Key','movie_key'], ['Movie','display_title'],
-        ['Revenue period',r=>`${r.run_start_date} – ${r.run_end_date}`],
-        ['Revenue',r=>fmt(r.total_revenue),true], ['Status','match_status'],
-        ['OMDb candidate',r=>r.candidate_title ? `${r.candidate_title} (${r.candidate_year || '?'}) · ${r.candidate_imdb_id || '—'}` : '—'],
-        ['Alternatives',r=>r.alternative_candidates || '—'],
-        ['Why flagged',r=>[
-          r.title_run_count > 1 ? `${r.title_run_count} periods for this title` : null,
-          r.manual_boundary_count ? `${r.manual_boundary_count} reviewed boundary rule(s)` : null,
-          r.boundary_changed_at_utc ? `Period changed from ${r.previous_run_start_date} – ${r.previous_run_end_date}` : null,
-          r.match_status === 'ambiguous' ? r.match_reason : null
-        ].filter(Boolean).join('; ') || '—'],
-        ['Decision',r=>r.decision ? `${r.decision}${r.verified_imdb_id ? ` (${r.verified_imdb_id})` : ''}: ${r.review_reason}` : '—']
-      ], data.cases);
-    }
-
     async function refresh() {
       const button = $('apply'); button.disabled = true; button.textContent = 'Loading…'; $('error').textContent = '';
       try {
@@ -277,9 +255,6 @@
         meta.distributors.forEach(value => appendOption($('distributor'),value));
         meta.genres.forEach(value => appendOption($('genre'),value));
         await refresh();
-        document.querySelector('details').addEventListener('toggle', event => {
-          if (event.target.open) loadReview().catch(error => { $('error').textContent = error.message; });
-        });
       } catch (error) { $('error').textContent = error.message; }
     })();
   </script>
