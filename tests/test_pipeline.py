@@ -3,11 +3,13 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 import duckdb
 
 from dashboard.queries import distributor_ranking, film_ranking, movie_ranking, overview
-from pipeline.enrich_omdb import enrich
+from pipeline.enrich_omdb import enrich, fetch_title
 from pipeline.load_revenues import load
 
 
@@ -93,6 +95,112 @@ class PipelineTests(unittest.TestCase):
                              "Studio Y")
             with self.assertRaises(ValueError):
                 movie_ranking(con, start, end, sort="revenue; DROP TABLE dim_movie")
+
+    def prepare_remakes(self):
+        self.write_rows([
+            ['1', '2019-07-19', 'The Lion King', '100', '10', 'Studio X'],
+            ['2', '2020-08-01', 'The Lion King', '50', '8', 'Studio X'],
+        ])
+        load(self.csv, self.db)
+
+    @staticmethod
+    def lion(year, title='The Lion King'):
+        return {'Response': 'True', 'Type': 'movie', 'Title': title,
+                'Year': str(year), 'imdbID': f'tt{year}000', 'Genre': 'Adventure'}
+
+    def test_year_query_parameter_is_optional(self):
+        with patch('pipeline.enrich_omdb.urllib.request.urlopen') as urlopen:
+            urlopen.return_value.__enter__.return_value.read.return_value = b'{}'
+            fetch_title('The Lion King', 'test-key', 2019)
+            query = parse_qs(urlsplit(urlopen.call_args.args[0].full_url).query)
+            self.assertEqual(query['y'], ['2019'])
+            fetch_title('The Lion King', 'test-key')
+            query = parse_qs(urlsplit(urlopen.call_args.args[0].full_url).query)
+            self.assertNotIn('y', query)
+
+    def test_remakes_use_separate_persistent_year_cache(self):
+        self.prepare_remakes()
+        calls = []
+        def fetch(title, key, year):
+            calls.append(year)
+            return self.lion(year or 1994)
+        result = enrich(self.db, 'test-key', limit=3, fetcher=fetch)
+        self.assertEqual(calls, [None, 2019, 2020])
+        self.assertEqual(result['requests'], 3)
+        with duckdb.connect(str(self.db)) as con:
+            self.assertEqual(con.execute(
+                'SELECT release_year FROM dim_movie ORDER BY run_start_date'
+            ).fetchall(), [(2019,), (2020,)])
+            self.assertEqual(con.execute('SELECT query_year FROM omdb_query_cache ORDER BY 1').fetchall(),
+                             [(0,), (2019,), (2020,)])
+            con.execute("UPDATE dim_movie SET match_status='pending'")
+        result = enrich(self.db, None, fetcher=lambda *_: self.fail('Network called'))
+        self.assertEqual(result['cache_reused'], 4)
+        with duckdb.connect(str(self.db)) as con:
+            self.assertEqual(con.execute('SELECT count(*) FROM omdb_request_log').fetchone()[0], 3)
+            self.assertEqual(con.execute('SELECT release_year FROM dim_movie ORDER BY run_start_date').fetchall(),
+                             [(2019,), (2020,)])
+
+    def test_fallback_respects_limits_and_can_resume_ambiguous(self):
+        for cap in ('limit', 'daily_cap'):
+            with self.subTest(cap=cap):
+                self.db = Path(self.tmp.name) / f'{cap}.duckdb'
+                self.prepare_remakes()
+                result = enrich(self.db, 'test-key', **{cap: 1}, fetcher=lambda *_: self.lion(1994))
+                self.assertEqual(result['requests'], 1)
+                with duckdb.connect(str(self.db)) as con:
+                    self.assertEqual(con.execute(
+                        "SELECT count(*) FROM dim_movie WHERE match_status='ambiguous'"
+                    ).fetchone()[0], 2)
+                calls = []
+                def fetch(title, key, year):
+                    calls.append(year)
+                    return self.lion(year)
+                enrich(self.db, 'test-key', retry_ambiguous=True, limit=2, fetcher=fetch)
+                self.assertEqual(calls, [2019, 2020])
+
+    def test_unsuccessful_fallback_preserves_ambiguous_and_is_cached(self):
+        self.prepare_remakes()
+        calls = []
+        def fetch(title, key, year):
+            calls.append(year)
+            return self.lion(1994) if year is None else {'Response': 'False', 'Error': 'Movie not found!'}
+        enrich(self.db, 'test-key', limit=3, fetcher=fetch)
+        self.assertEqual(calls, [None, 2019, 2020])
+        enrich(self.db, 'test-key', retry_ambiguous=True,
+               fetcher=lambda *_: self.fail('Repeated cached query'))
+        with duckdb.connect(str(self.db)) as con:
+            self.assertEqual(con.execute('SELECT match_status,imdb_id FROM dim_movie').fetchall(),
+                             [('ambiguous', None), ('ambiguous', None)])
+
+    def test_fallback_still_validates_title_and_year(self):
+        self.prepare_remakes()
+        def fetch(title, key, year):
+            return self.lion(1994) if year is None else self.lion(year, 'Different film')
+        enrich(self.db, 'test-key', limit=3, fetcher=fetch)
+        with duckdb.connect(str(self.db)) as con:
+            self.assertEqual(con.execute("SELECT count(*) FROM dim_movie WHERE match_status='matched'").fetchone()[0], 0)
+
+    def test_fallback_invalid_key_stops_batch(self):
+        self.prepare_remakes()
+        def fetch(title, key, year):
+            return self.lion(1994) if year is None else {'Response': 'False', 'Error': 'Invalid API key!'}
+        result = enrich(self.db, 'test-key', limit=10, fetcher=fetch)
+        self.assertEqual(result['requests'], 2)
+        self.assertEqual(result['invalid_key'], 1)
+
+    def test_legacy_cache_upgrade_reuses_title_response(self):
+        self.prepare_remakes()
+        enrich(self.db, 'test-key', limit=1, fetcher=lambda *_: self.lion(1994))
+        with duckdb.connect(str(self.db)) as con:
+            con.execute('DROP TABLE omdb_query_cache')
+            con.execute('ALTER TABLE omdb_lookup DROP COLUMN query_year')
+        calls = []
+        def fetch(title, key, year):
+            calls.append(year)
+            return self.lion(year)
+        enrich(self.db, 'test-key', retry_ambiguous=True, limit=2, fetcher=fetch)
+        self.assertEqual(calls, [2019, 2020])
 
 
 if __name__ == "__main__":

@@ -2,6 +2,8 @@
 
 A local Python + DuckDB pipeline loads daily revenue from `revenues_per_day.csv`, enriches reporting periods with [OMDb](https://www.omdbapi.com/), and serves a ranking dashboard. Verified with Python 3.12.8 and DuckDB 1.5.1.
 
+![Box office ranking dashboard](docs/dashboard.png)
+
 ## Run
 
 On Windows PowerShell:
@@ -23,6 +25,14 @@ Put your [free OMDb key](https://www.omdbapi.com/apikey.aspx) in `.env` as `OMDB
 Open [http://127.0.0.1:8501/](http://127.0.0.1:8501/). The default database is `data/box_office.duckdb`; both pipeline commands accept `--db`. The CSV loader also accepts `--csv`. Stop the dashboard before a command writes to the same database.
 
 The database and `.env` are ignored by Git. Reimporting the same CSV retains matched periods, saved OMDb responses and the request history. `python -m pipeline.enrich_omdb --offline` reuses saved title responses for eligible periods without an API key or new requests.
+
+To revisit ambiguous periods, stop the dashboard and run:
+
+```powershell
+.\.venv\Scripts\python.exe -m pipeline.enrich_omdb --retry-ambiguous --limit 100
+```
+
+When a title-only response has an incompatible release year, the pipeline makes one additional query using the year of the first revenue record. The same matching rules still apply. Each network request counts toward both `--limit` and the daily cap. If the fallback is unavailable, unsuccessful or uncertain, the period stays `ambiguous`; rerun with `--retry-ambiguous` after a limit or temporary error. Cached results can also be reviewed with `--retry-ambiguous --offline`.
 
 ## Data and model
 
@@ -71,13 +81,17 @@ erDiagram
     }
 ```
 
-`raw_revenues` keeps the parsed CSV snapshot. `omdb_lookup` stores the JSON response for each queried period; `omdb_request_log` counts requests toward the safety cap. A saved response for the same source title can be reused for another period, but it is checked again against that period's dates. Only an exact normalized title and plausible release year become `matched`; all fact revenue stays in the model even without a match. The film ranking combines matched periods by IMDb ID. The release-period ranking includes every period.
+`raw_revenues` keeps the parsed CSV snapshot. `omdb_lookup` stores the selected response and classification for each queried period; `omdb_request_log` counts requests toward the safety cap. `omdb_query_cache` stores responses by source title and query year (0 means no year filter), keeping title-only and year-specific queries separate. Existing saved responses are copied into this cache automatically. Reused responses are checked again against the current period's dates. Only an exact normalized title and plausible release year become `matched`; all fact revenue stays in the model even without a match. The film ranking combines matched periods by IMDb ID. The release-period ranking includes every period.
 
-Examples of ambiguous matches in the saved OMDb responses include **The Lion King** (2019 revenue versus a 1994 OMDb candidate), **Legally Blonde 2** (shortened source title versus the longer OMDb title, *Legally Blonde 2: Red, White & Blonde*), and **American Sniper** (revenue starting in December 2014 versus an OMDb year of 2015). These cases illustrate title collisions, title variations, and release-year discrepancies. Their revenue remains in the model, but OMDb metadata is not assigned automatically. Conservative matching can also reject valid candidates; these cases require review rather than automatic acceptance.
+Examples encountered during matching include **The Lion King** (2019 revenue versus a 1994 title-only candidate, resolved by the year-specific query), **Legally Blonde 2** (shortened source title versus the longer OMDb title, *Legally Blonde 2: Red, White & Blonde*), and **American Sniper** (revenue starting in December 2014 versus an OMDb year of 2015). The latter two remain ambiguous. These cases illustrate title collisions, title variations, and release-year discrepancies. Revenue remains in the model even when metadata cannot be assigned. Conservative matching can also reject valid candidates; these cases require review rather than automatic acceptance.
+
+OMDb can return short films under `Type=movie`. Year-specific queries for **Coco (2020)** and **The Revenant (2015)** returned short films with matching titles and years. Candidates whose genre includes `Short` therefore remain `ambiguous` for manual review, even when title and year agree. This is a conservative rule for this dataset, not proof that all short-film revenue records are invalid.
 
 ## Demonstration
 
-The local database on 25 September 2026 had **6,661 periods**, of which **908 had been processed**: **863 matched**, **34 ambiguous**, **11 not found**, and **5,753 pending**. Matched periods covered **65.77% of source revenue**. This is coverage, not match accuracy.
+The local database on 25 September 2026 had **6,661 periods**, of which **908 had been processed**: **878 matched**, **19 ambiguous**, **11 not found**, and **5,753 pending**. Matched periods covered **66.94% of source revenue**. This is coverage, not match accuracy.
+
+Rechecking the 34 ambiguous periods used **28 new API requests** and resolved **15 periods**, increasing revenue coverage from **65.77% to 66.94%** (1.17 percentage points; **$2.40 billion** of additional revenue linked to OMDb metadata). Two short-film candidates were excluded after response review. The total fact revenue did not change.
 
 Enrichment is intentionally partial due to the free OMDb API request limit. Subsequent runs continue processing pending titles while reusing cached responses. All CSV revenue records are loaded regardless of enrichment status. A clean checkout has no saved OMDb responses; `--limit 100` processes the highest-revenue pending periods first. The [free OMDb tier](https://www.omdbapi.com/apikey.aspx) lists 1,000 requests per day; this pipeline caps itself at 900 in a rolling 24-hour window. Use `--daily-cap` to set a lower ceiling.
 

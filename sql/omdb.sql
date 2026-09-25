@@ -9,6 +9,17 @@ CREATE TABLE IF NOT EXISTS omdb_lookup (
     fetched_at_utc TIMESTAMP NOT NULL
 );
 
+-- Zero denotes a title-only query; actual years identify year-specific queries.
+CREATE TABLE IF NOT EXISTS omdb_query_cache (
+    source_title VARCHAR NOT NULL,
+    query_year INTEGER NOT NULL,
+    response_json VARCHAR NOT NULL,
+    fetched_at_utc TIMESTAMP NOT NULL,
+    PRIMARY KEY (source_title, query_year)
+);
+
+ALTER TABLE omdb_lookup ADD COLUMN IF NOT EXISTS query_year INTEGER;
+
 -- Reserve each request before sending it so a failed call still uses budget.
 CREATE TABLE IF NOT EXISTS omdb_request_log (
     request_id VARCHAR PRIMARY KEY,
