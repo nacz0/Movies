@@ -6,7 +6,7 @@ from pathlib import Path
 
 import duckdb
 
-from dashboard.queries import film_ranking, movie_ranking, overview
+from dashboard.queries import distributor_ranking, film_ranking, movie_ranking, overview
 from pipeline.enrich_omdb import enrich
 from pipeline.load_revenues import load
 
@@ -80,6 +80,19 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(con.execute(
                 "SELECT count(*) FROM dim_movie WHERE match_status = 'pending'"
             ).fetchone()[0], 3)
+
+    def test_sorting_happens_before_ranking_limit(self):
+        load(self.csv, self.db)
+        with duckdb.connect(str(self.db)) as con:
+            start, end = date(2020, 1, 1), date(2021, 1, 2)
+            self.assertEqual(movie_ranking(con, start, end, limit=1)[0]["revenue"], 100)
+            self.assertEqual(movie_ranking(con, start, end, limit=1,
+                                           sort="movie", direction="desc")[0]["movie"], "Film B")
+            self.assertEqual(distributor_ranking(con, start, end, limit=1,
+                                                 sort="distributor", direction="desc")[0]["distributor"],
+                             "Studio Y")
+            with self.assertRaises(ValueError):
+                movie_ranking(con, start, end, sort="revenue; DROP TABLE dim_movie")
 
 
 if __name__ == "__main__":

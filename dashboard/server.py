@@ -92,6 +92,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if limit not in (10, 20, 50, 100):
                     raise ValueError("Ranking size must be 10, 20, 50, or 100")
 
+                movie_sort = query.get("movie_sort", ["revenue"])[0]
+                movie_dir = query.get("movie_dir", ["desc"])[0]
+                film_sort = query.get("film_sort", ["revenue"])[0]
+                film_dir = query.get("film_dir", ["desc"])[0]
+                distributor_sort = query.get("distributor_sort", ["revenue"])[0]
+                distributor_dir = query.get("distributor_dir", ["desc"])[0]
+
                 base = overview(con, start, end, distributors)
                 selected = overview(con, start, end, distributors, genre)
                 self._json(200, {
@@ -99,9 +106,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "selected": selected,
                     "coverage": base["matched_revenue"] / base["revenue"] if base["revenue"] else 0,
                     "enrichment": enrichment_status(con, start, end, distributors),
-                    "movies": movie_ranking(con, start, end, distributors, genre, limit),
-                    "films": film_ranking(con, start, end, distributors, genre, limit),
-                    "distributors": distributor_ranking(con, start, end, distributors, genre, limit),
+                    "movies": movie_ranking(con, start, end, distributors, genre, limit,
+                                             movie_sort, movie_dir),
+                    "bar_movies": movie_ranking(con, start, end, distributors, genre, 10),
+                    "films": film_ranking(con, start, end, distributors, genre, limit,
+                                          film_sort, film_dir),
+                    "distributors": distributor_ranking(con, start, end, distributors,
+                                                        genre, limit, distributor_sort,
+                                                        distributor_dir),
                     "trend": monthly_trend(con, start, end, distributors, genre),
                 })
         except (ValueError, TypeError) as exc:

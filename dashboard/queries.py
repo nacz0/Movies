@@ -12,6 +12,13 @@ def _records(cursor: duckdb.DuckDBPyConnection) -> list[dict]:
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
+def _order_by(sort: str, direction: str, allowed: dict[str, str], tie_breaker: str) -> str:
+    """Build an ORDER BY clause from fixed SQL expressions, never request text."""
+    if sort not in allowed or direction not in ("asc", "desc"):
+        raise ValueError("Invalid ranking sort")
+    return f"{allowed[sort]} {direction.upper()} NULLS LAST, {tie_breaker}"
+
+
 def filters(
     start: date,
     end: date,
@@ -100,10 +107,16 @@ def movie_ranking(
     distributors: list[str] | None = None,
     genre: str | None = None,
     limit: int = 20,
+    sort: str = "revenue",
+    direction: str = "desc",
 ):
     if limit < 1 or limit > 100:
         raise ValueError("limit must be between 1 and 100")
     where, parameters = filters(start, end, distributors, genre)
+    order = _order_by(sort, direction, {
+        "movie": "movie", "revenue": "revenue", "reported_days": "reported_days",
+        "genre": "genre", "imdb_rating": "imdb_rating", "match_status": "match_status",
+    }, "revenue DESC, movie ASC")
     return _records(con.execute(
         f"""
         SELECT m.display_title AS movie,
@@ -119,7 +132,7 @@ def movie_ranking(
         WHERE {where}
         GROUP BY m.movie_key, m.display_title, m.primary_genre,
                  m.imdb_rating, m.match_status
-        ORDER BY revenue DESC, movie
+        ORDER BY {order}
         LIMIT ?
         """,
         [*parameters, limit],
@@ -133,6 +146,8 @@ def film_ranking(
     distributors: list[str] | None = None,
     genre: str | None = None,
     limit: int = 20,
+    sort: str = "revenue",
+    direction: str = "desc",
 ) -> list[dict]:
     """Rank matched IMDb IDs, combining their reporting periods."""
     if limit < 1 or limit > 100:
@@ -141,6 +156,11 @@ def film_ranking(
     if genre:
         where += " AND m.primary_genre = ?"
         parameters.append(genre)
+    order = _order_by(sort, direction, {
+        "film": "film", "release_year": "release_year", "revenue": "revenue",
+        "periods": "periods", "reported_days": "reported_days", "genre": "genre",
+        "imdb_rating": "imdb_rating",
+    }, "revenue DESC, m.imdb_id ASC")
     return _records(con.execute(f"""
         SELECT max(m.omdb_title) || COALESCE(' (' || CAST(max(m.release_year) AS VARCHAR) || ')', '')
                    AS film,
@@ -155,7 +175,7 @@ def film_ranking(
         JOIN dim_distributor x ON x.distributor_key = f.distributor_key
         WHERE {where} AND m.match_status = 'matched' AND m.imdb_id IS NOT NULL
         GROUP BY m.imdb_id
-        ORDER BY revenue DESC, m.imdb_id
+        ORDER BY {order}
         LIMIT ?
     """, [*parameters, limit]))
 
@@ -167,8 +187,13 @@ def distributor_ranking(
     distributors: list[str] | None = None,
     genre: str | None = None,
     limit: int = 20,
+    sort: str = "revenue",
+    direction: str = "desc",
 ):
     where, parameters = filters(start, end, distributors, genre)
+    order = _order_by(sort, direction, {
+        "distributor": "distributor", "revenue": "revenue", "movies": "movies",
+    }, "revenue DESC, distributor ASC")
     return _records(con.execute(
         f"""
         SELECT x.distributor_name AS distributor,
@@ -180,7 +205,7 @@ def distributor_ranking(
         JOIN dim_distributor x ON x.distributor_key = f.distributor_key
         WHERE {where}
         GROUP BY x.distributor_name
-        ORDER BY revenue DESC, distributor
+        ORDER BY {order}
         LIMIT ?
         """,
         [*parameters, limit],

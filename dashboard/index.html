@@ -5,73 +5,83 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Box office ranking</title>
   <style>
-    :root { color-scheme: light; --ink:#14202c; --muted:#657587; --line:#dce3e9; --blue:#175cd3; --pale:#eaf1fc; --bg:#f5f7fa; --white:#fff; }
+    :root { color-scheme: light; --ink:#172435; --muted:#64748b; --line:#e3e9f0; --blue:#175cd3; --pale:#eaf1fc; --bg:#f7f9fc; --white:#fff; }
     * { box-sizing:border-box; }
     body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 Segoe UI, Arial, sans-serif; }
-    .shell { max-width:1440px; margin:auto; padding:30px 28px 60px; }
-    header { display:flex; align-items:flex-end; justify-content:space-between; gap:24px; margin-bottom:24px; }
+    .shell { max-width:1480px; margin:auto; padding:36px 32px 64px; }
+    header { display:flex; align-items:flex-end; justify-content:space-between; gap:24px; margin-bottom:26px; }
     .eyebrow { color:var(--blue); font-size:11px; font-weight:800; letter-spacing:.17em; text-transform:uppercase; }
-    h1 { margin:6px 0 5px; font-size:clamp(28px,3vw,42px); letter-spacing:-.035em; line-height:1.1; }
-    h2 { margin:0 0 16px; font-size:18px; letter-spacing:-.02em; }
+    h1 { margin:6px 0 5px; font-size:clamp(30px,3vw,42px); letter-spacing:-.04em; line-height:1.1; }
+    h2 { margin:0; font-size:18px; letter-spacing:-.025em; }
     p { margin:0; }
     .subtitle, .note { color:var(--muted); }
-    .scope { color:var(--muted); font-size:12px; text-align:right; }
-    .card { background:var(--white); border:1px solid var(--line); border-radius:14px; box-shadow:0 4px 16px rgba(25,45,65,.035); }
-    .filters { display:grid; grid-template-columns:repeat(2,minmax(135px,1fr)) minmax(190px,1.5fr) minmax(145px,1fr) 95px 130px; gap:12px; align-items:end; padding:18px; margin-bottom:18px; }
+    .scope { color:var(--muted); font-size:12px; text-align:right; max-width:340px; }
+    .scope strong { display:block; color:var(--ink); font-size:13px; }
+    .surface { background:var(--white); border:1px solid var(--line); border-radius:16px; }
+    .filters { display:grid; grid-template-columns:repeat(2,minmax(135px,1fr)) minmax(190px,1.5fr) minmax(145px,1fr) 95px 130px; gap:12px; align-items:end; padding:18px 20px; margin-bottom:10px; }
     label { display:block; margin:0 0 6px; color:var(--muted); font-size:12px; font-weight:700; }
     input, select, button { width:100%; min-height:38px; border-radius:7px; font:inherit; }
     input, select { border:1px solid #cdd7e1; padding:7px 9px; background:white; color:var(--ink); }
     button { border:0; background:var(--blue); color:#fff; font-weight:700; cursor:pointer; padding:7px 12px; }
     button:hover { background:#0f4cab; }
     button:disabled { opacity:.55; cursor:wait; }
-    .metrics { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:18px; }
-    .metric { padding:18px 20px; min-height:112px; }
+    .metrics { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); margin-bottom:26px; }
+    .metric { padding:20px 24px; min-width:0; }
+    .metric + .metric { border-left:1px solid var(--line); }
     .metric .label { display:block; color:var(--muted); font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
-    .metric strong { display:block; margin-top:12px; font-size:clamp(21px,2.1vw,30px); line-height:1.1; letter-spacing:-.035em; font-variant-numeric:tabular-nums; }
+    .metric strong { display:block; margin-top:10px; font-size:clamp(21px,2.1vw,30px); line-height:1.1; letter-spacing:-.035em; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
     .metric small { display:block; color:var(--muted); margin-top:5px; }
-    .notice { padding:12px 16px; border-radius:9px; background:var(--pale); color:#25496f; margin-bottom:18px; border:1px solid #d2e2f6; }
+    .notice { padding:3px 2px 3px 14px; color:var(--muted); margin-bottom:18px; font-size:12px; line-height:1.6; border-left:3px solid #b4c9ee; }
     .notice:empty { display:none; }
-    .grid { display:grid; grid-template-columns:1.12fr .88fr; gap:18px; margin-bottom:18px; }
-    .panel { padding:20px; min-width:0; }
-    .panel-head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; }
+    .grid { display:grid; grid-template-columns:1.12fr .88fr; margin-bottom:24px; }
+    .panel { padding:24px; min-width:0; }
+    .grid > .panel + .panel { border-left:1px solid var(--line); }
+    .ranking-primary { margin-bottom:24px; }
+    .panel-head { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; }
+    .panel-head h2 { margin-bottom:0; }
     .panel-head span { color:var(--muted); font-size:12px; }
-    .bars { display:grid; gap:10px; margin-top:8px; }
-    .bar-row { display:grid; grid-template-columns:minmax(120px,40%) 1fr 95px; gap:10px; align-items:center; min-width:0; }
+    .ranking-tools { display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
+    .ranking-tools label { margin:0 3px 0 0; }
+    .ranking-tools select { width:auto; min-width:150px; min-height:32px; padding:4px 8px; font-size:12px; }
+    .sort-direction { width:34px; min-height:32px; padding:3px; border:1px solid #cdd7e1; background:#fff; color:var(--blue); font-size:18px; line-height:1; }
+    .sort-direction:hover { background:var(--pale); }
+    .bars { display:grid; gap:10px; margin-top:22px; }
+    .bar-row { display:grid; grid-template-columns:minmax(120px,40%) 1fr 112px; gap:10px; align-items:center; min-width:0; }
     .bar-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
     .track { height:9px; background:#eaf0f6; border-radius:20px; overflow:hidden; }
     .fill { height:100%; background:linear-gradient(90deg,#2f7fe7,#175cd3); border-radius:20px; }
     .bar-value { text-align:right; font-size:12px; font-weight:700; font-variant-numeric:tabular-nums; }
-    .trend { width:100%; height:250px; display:block; overflow:visible; }
+    .trend { width:100%; height:250px; display:block; overflow:visible; margin-top:10px; }
     .trend-line { fill:none; stroke:var(--blue); stroke-width:3; stroke-linejoin:round; stroke-linecap:round; }
     .trend-area { fill:#e3eefc; }
     .trend-guide { stroke:#e0e8f0; stroke-width:1; }
-    .trend-label { fill:var(--muted); font-size:12px; }
     .trend-summary { display:flex; justify-content:space-between; color:var(--muted); font-size:12px; margin-top:2px; }
+    .note { margin:8px 0 16px; font-size:12px; }
     .table-wrap { overflow:auto; max-height:500px; }
     table { width:100%; border-collapse:collapse; font-size:13px; }
-    th { position:sticky; top:0; background:#f9fbfd; color:var(--muted); text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
+    th { position:sticky; top:0; background:#fff; color:var(--muted); text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.04em; box-shadow:inset 0 -1px var(--line); }
     td, th { padding:10px 8px; border-bottom:1px solid #edf1f4; }
+    th button { width:auto; min-height:0; padding:2px 0; border-radius:0; background:transparent; color:inherit; font:inherit; text-transform:inherit; letter-spacing:inherit; white-space:nowrap; }
+    th button:hover { background:transparent; color:var(--blue); }
+    th[aria-sort] button { color:var(--blue); }
     td.number, th.number { text-align:right; font-variant-numeric:tabular-nums; }
     tr:hover td { background:#f8fbff; }
-    .status { display:inline-block; border-radius:20px; padding:2px 7px; font-size:11px; background:#eef2f5; color:#627083; }
-    .status.matched { background:#e5f5eb; color:#197541; }
     .export { width:auto; min-height:30px; padding:5px 9px; font-size:12px; background:#eaf1fc; color:var(--blue); }
     .export:hover { background:#dbe9fb; }
-    footer { color:var(--muted); font-size:12px; margin-top:22px; }
     .error { color:#a12424; padding:15px 18px; margin-bottom:18px; background:#fff0f0; border:1px solid #ffd1d1; border-radius:9px; }
     .error:empty { display:none; }
-    @media (max-width:1000px) { .filters { grid-template-columns:repeat(3,1fr); } .metrics { grid-template-columns:repeat(2,1fr); } .grid { grid-template-columns:1fr; } }
-    @media (max-width:620px) { .shell { padding:18px 12px 36px; } header { display:block; } .scope { text-align:left; margin-top:12px; } .filters { grid-template-columns:repeat(2,1fr); } .metrics { gap:8px; } .metric { padding:14px; } .bar-row { grid-template-columns:minmax(80px,34%) 1fr 70px; gap:6px; } }
+    @media (max-width:1000px) { .filters { grid-template-columns:repeat(3,1fr); } .metrics { grid-template-columns:repeat(2,1fr); } .metric:nth-child(3) { border-left:0; } .metric:nth-child(n+3) { border-top:1px solid var(--line); } .grid { grid-template-columns:1fr; } .grid > .panel + .panel { border-left:0; border-top:1px solid var(--line); } }
+    @media (max-width:620px) { .shell { padding:20px 14px 40px; } header { display:block; } .scope { text-align:left; margin-top:14px; } .filters { grid-template-columns:repeat(2,minmax(0,1fr)); padding:16px; } .filters > div:nth-child(3), .filters > div:nth-child(4) { grid-column:span 2; } .filters button { grid-column:span 2; } .metric { padding:16px; } .metric strong { font-size:21px; } .panel { padding:18px 16px; } .bar-row { grid-template-columns:minmax(80px,34%) 1fr 88px; gap:6px; } }
   </style>
 </head>
 <body>
   <div class="shell">
     <header>
-      <div><div class="eyebrow">Film revenue / analysis</div><h1>Box office ranking</h1><p class="subtitle">Daily revenue, ranked across the selected period.</p></div>
-      <div class="scope">Source: revenues_per_day.csv<br>Amounts in source units · currency unspecified</div>
+      <div><div class="eyebrow">Film revenue / analysis</div><h1>Box office ranking</h1><p class="subtitle">Daily theatrical grosses across the selected period.</p></div>
+      <div class="scope"><strong>Domestic box office · USD</strong>USA and Canada · gross ticket sales, not studio profit<br>Source: revenues_per_day.csv</div>
     </header>
 
-    <form class="filters card" id="filters">
+    <form class="filters surface" id="filters">
       <div><label for="start">From</label><input id="start" type="date" required></div>
       <div><label for="end">To</label><input id="end" type="date" required></div>
       <div><label for="distributor">Distributor</label><select id="distributor"><option value="">All distributors</option></select></div>
@@ -82,29 +92,49 @@
     <div id="error" class="error" role="alert"></div>
     <div id="notice" class="notice"></div>
 
-    <section class="metrics">
-      <div class="card metric"><span class="label">Revenue</span><strong id="revenue">—</strong><small>Source units</small></div>
-      <div class="card metric"><span class="label">Release periods</span><strong id="movies-count">—</strong><small>In this selection</small></div>
-      <div class="card metric"><span class="label">Reporting days</span><strong id="days">—</strong><small>With a revenue record</small></div>
-      <div class="card metric"><span class="label">OMDb coverage</span><strong id="coverage">—</strong><small>Share of revenue matched</small></div>
+    <section class="metrics surface" aria-label="Selection summary">
+      <div class="metric"><span class="label">Box office gross</span><strong id="revenue">—</strong><small>Domestic · USD</small></div>
+      <div class="metric"><span class="label">Release periods</span><strong id="movies-count">—</strong><small>In this selection</small></div>
+      <div class="metric"><span class="label">Reporting days</span><strong id="days">—</strong><small>With a revenue record</small></div>
+      <div class="metric"><span class="label">OMDb coverage</span><strong id="coverage">—</strong><small>Share of revenue matched</small></div>
     </section>
 
-    <div class="grid">
-      <section class="card panel"><div class="panel-head"><h2>Top release periods</h2><span>Revenue</span></div><div id="bars" class="bars"></div></section>
-      <section class="card panel"><div class="panel-head"><h2>Monthly trend</h2><span id="trend-count"></span></div><svg id="trend" class="trend" viewBox="0 0 1000 230" role="img" aria-label="Monthly revenue trend"></svg><div id="trend-summary" class="trend-summary"></div></section>
+    <div class="grid surface">
+      <section class="panel"><div class="panel-head"><h2>Top release periods</h2><span>Gross · USD</span></div><div id="bars" class="bars"></div></section>
+      <section class="panel"><div class="panel-head"><h2>Monthly trend</h2><span id="trend-count"></span></div><svg id="trend" class="trend" viewBox="0 0 1000 230" role="img" aria-label="Monthly box office gross in USD"></svg><div id="trend-summary" class="trend-summary"></div></section>
     </div>
 
-    <section class="card panel" style="margin-bottom:18px"><div class="panel-head"><h2>Confirmed film ranking</h2><button id="download-films" class="export" type="button">Download CSV</button></div><p class="note">Revenue from all periods linked to the same IMDb ID is combined.</p><div class="table-wrap"><table id="films-table"></table></div></section>
-    <div class="grid">
-      <section class="card panel"><div class="panel-head"><h2>Release period ranking</h2><button id="download" class="export" type="button">Download CSV</button></div><div class="table-wrap"><table id="movies-table"></table></div></section>
-      <section class="card panel"><div class="panel-head"><h2>Distributor ranking</h2><span>Selected period</span></div><div class="table-wrap"><table id="distributors-table"></table></div></section>
+    <section class="surface panel ranking-primary"><div class="panel-head"><h2>Confirmed film ranking</h2><div class="ranking-tools"><label for="film-sort">Sort by</label><select id="film-sort"><option value="revenue">Gross · USD</option><option value="film">Film</option><option value="release_year">Release year</option><option value="periods">Periods</option><option value="reported_days">Days</option><option value="genre">Genre</option><option value="imdb_rating">IMDb rating</option></select><button id="film-dir" class="sort-direction" type="button" aria-label="Change film sort direction"></button><button id="download-films" class="export" type="button">Download CSV</button></div></div><p class="note">Gross from all periods linked to the same IMDb ID is combined. Click a column heading to sort.</p><div class="table-wrap"><table id="films-table"></table></div></section>
+    <div class="grid surface">
+      <section class="panel"><div class="panel-head"><h2>Release period ranking</h2><div class="ranking-tools"><label for="movie-sort">Sort by</label><select id="movie-sort"><option value="revenue">Gross · USD</option><option value="movie">Title</option><option value="reported_days">Days</option><option value="genre">Genre</option><option value="imdb_rating">IMDb rating</option><option value="match_status">Match</option></select><button id="movie-dir" class="sort-direction" type="button" aria-label="Change release period sort direction"></button><button id="download" class="export" type="button">Download CSV</button></div></div><div class="table-wrap"><table id="movies-table"></table></div></section>
+      <section class="panel"><div class="panel-head"><h2>Distributor ranking</h2><div class="ranking-tools"><label for="distributor-sort">Sort by</label><select id="distributor-sort"><option value="revenue">Gross · USD</option><option value="distributor">Distributor</option><option value="movies">Movies</option></select><button id="distributor-dir" class="sort-direction" type="button" aria-label="Change distributor sort direction"></button></div></div><div class="table-wrap"><table id="distributors-table"></table></div></section>
     </div>
-    <footer>Title and year matching is only a heuristic. Ambiguous and unmatched periods remain in the release-period ranking. Theater counts are not summed as unique cinemas.</footer>
   </div>
   <script>
     const $ = id => document.getElementById(id);
     const fmt = n => Number(n || 0).toLocaleString('en-US', {maximumFractionDigits:0});
+    const money = n => '$' + fmt(n);
     let latestMovies = [], latestFilms = [];
+    let activeRequest = null;
+    const sortDirection = {movie:'desc', film:'desc', distributor:'desc'};
+    const sortKinds = ['movie', 'film', 'distributor'];
+
+    function updateDirection(kind) {
+      const button = $(`${kind}-dir`);
+      button.textContent = sortDirection[kind] === 'asc' ? '↑' : '↓';
+      button.title = sortDirection[kind] === 'asc' ? 'Ascending; click for descending' : 'Descending; click for ascending';
+    }
+
+    function changeSort(kind, key) {
+      const select = $(`${kind}-sort`);
+      if (select.value === key) sortDirection[kind] = sortDirection[kind] === 'asc' ? 'desc' : 'asc';
+      else {
+        select.value = key;
+        sortDirection[kind] = ['revenue','periods','reported_days','imdb_rating','movies','release_year'].includes(key) ? 'desc' : 'asc';
+      }
+      updateDirection(kind);
+      refresh();
+    }
 
     function appendOption(select, value) {
       const option = document.createElement('option');
@@ -120,15 +150,22 @@
       row.append(td);
     }
 
-    function renderTable(id, columns, rows) {
+    function renderTable(id, columns, rows, kind) {
       const table = $(id);
       table.replaceChildren();
       const head = document.createElement('thead');
       const heading = document.createElement('tr');
-      for (const [label, , numeric] of columns) {
+      for (const [label, , numeric, sortKey] of columns) {
         const th = document.createElement('th');
-        th.textContent = label;
         if (numeric) th.className = 'number';
+        if (sortKey) {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = label + ($(`${kind}-sort`).value === sortKey ? (sortDirection[kind] === 'asc' ? ' ↑' : ' ↓') : '');
+          button.addEventListener('click', () => changeSort(kind, sortKey));
+          th.append(button);
+          if ($(`${kind}-sort`).value === sortKey) th.setAttribute('aria-sort', sortDirection[kind] === 'asc' ? 'ascending' : 'descending');
+        } else th.textContent = label;
         heading.append(th);
       }
       head.append(heading);
@@ -155,7 +192,7 @@
         const track = document.createElement('div'); track.className = 'track';
         const fill = document.createElement('div'); fill.className = 'fill'; fill.style.width = `${100 * Number(item.revenue) / max}%`;
         track.append(fill);
-        const value = document.createElement('span'); value.className = 'bar-value'; value.textContent = fmt(item.revenue);
+        const value = document.createElement('span'); value.className = 'bar-value'; value.textContent = money(item.revenue);
         row.append(name, track, value); box.append(row);
       }
     }
@@ -186,23 +223,31 @@
       const path = document.createElementNS(ns,'path'); path.setAttribute('d',linePoints); path.setAttribute('class','trend-line'); svg.append(path);
       const summary = $('trend-summary');
       const first = document.createElement('span'); first.textContent = rows[0].month.slice(0,7);
-      const peak = document.createElement('span'); peak.textContent = `Peak month: ${fmt(max)}`;
+      const peak = document.createElement('span'); peak.textContent = `Peak month: ${money(max)}`;
       const last = document.createElement('span'); last.textContent = rows.at(-1).month.slice(0,7);
       summary.append(first, peak, last);
     }
 
     async function refresh() {
+      if (activeRequest) activeRequest.abort();
+      const request = new AbortController();
+      activeRequest = request;
       const button = $('apply'); button.disabled = true; button.textContent = 'Loading…'; $('error').textContent = '';
       try {
         const params = new URLSearchParams({start:$('start').value,end:$('end').value,limit:$('limit').value});
+        for (const kind of sortKinds) {
+          params.set(`${kind}_sort`, $(`${kind}-sort`).value);
+          params.set(`${kind}_dir`, sortDirection[kind]);
+        }
         if ($('distributor').value) params.set('distributor',$('distributor').value);
         if ($('genre').value) params.set('genre',$('genre').value);
-        const response = await fetch(`/api/dashboard?${params}`);
+        const response = await fetch(`/api/dashboard?${params}`, {signal:request.signal});
         const data = await response.json();
+        if (request !== activeRequest) return;
         if (!response.ok) throw new Error(data.error || 'Could not load dashboard');
         latestMovies = data.movies;
         latestFilms = data.films;
-        $('revenue').textContent = fmt(data.selected.revenue);
+        $('revenue').textContent = money(data.selected.revenue);
         $('movies-count').textContent = fmt(data.selected.movies);
         $('days').textContent = fmt(data.selected.days);
         $('coverage').textContent = `${(data.coverage*100).toFixed(1)}%`;
@@ -210,41 +255,50 @@
         const processed = data.enrichment.reduce((sum, row) => sum + (row.status === 'pending' ? 0 : row.periods), 0);
         const periods = data.enrichment.reduce((sum, row) => sum + row.periods, 0);
         $('notice').textContent = `OMDb processing for selected dates and distributor: ${fmt(processed)} / ${fmt(periods)} periods; ${fmt(counts.matched)} matched, ${fmt(counts.ambiguous)} ambiguous, ${fmt(counts.not_found)} not found, ${fmt(counts.pending)} pending. Matched periods account for ${(data.coverage*100).toFixed(1)}% of revenue.${$('genre').value ? ' Genre results include only matched movies.' : ''}`;
-        renderBars(data.movies);
+        renderBars(data.bar_movies);
         renderTrend(data.trend);
         renderTable('films-table', [
-          ['#',(_,i)=>i+1,true], ['Film','film'], ['IMDb ID','imdb_id'],
-          ['Revenue',r=>fmt(r.revenue),true], ['Periods',r=>fmt(r.periods),true],
-          ['Days',r=>fmt(r.reported_days),true], ['Genre','genre'],
-          ['IMDb rating',r=>r.imdb_rating == null ? '—' : r.imdb_rating,true]
-        ], data.films);
+          ['#',(_,i)=>i+1,true], ['Film','film',false,'film'], ['Year','release_year',true,'release_year'], ['IMDb ID','imdb_id'],
+          ['Gross · USD',r=>money(r.revenue),true,'revenue'], ['Periods',r=>fmt(r.periods),true,'periods'],
+          ['Days',r=>fmt(r.reported_days),true,'reported_days'], ['Genre','genre',false,'genre'],
+          ['IMDb rating',r=>r.imdb_rating == null ? '—' : r.imdb_rating,true,'imdb_rating']
+        ], data.films, 'film');
         renderTable('movies-table', [
-          ['#',(_,i)=>i+1,true], ['Release period','movie'], ['Revenue',r=>fmt(r.revenue),true],
-          ['Days',r=>fmt(r.reported_days),true], ['Genre','genre'],
-          ['IMDb',r=>r.imdb_rating == null ? '—' : r.imdb_rating,true], ['Match','match_status']
-        ], data.movies);
+          ['#',(_,i)=>i+1,true], ['Release period','movie',false,'movie'], ['Gross · USD',r=>money(r.revenue),true,'revenue'],
+          ['Days',r=>fmt(r.reported_days),true,'reported_days'], ['Genre','genre',false,'genre'],
+          ['IMDb',r=>r.imdb_rating == null ? '—' : r.imdb_rating,true,'imdb_rating'], ['Match','match_status',false,'match_status']
+        ], data.movies, 'movie');
         renderTable('distributors-table', [
-          ['#',(_,i)=>i+1,true], ['Distributor','distributor'],
-          ['Revenue',r=>fmt(r.revenue),true], ['Movies',r=>fmt(r.movies),true]
-        ], data.distributors);
-      } catch (error) { $('error').textContent = error.message; }
-      finally { button.disabled = false; button.textContent = 'Apply filters'; }
+          ['#',(_,i)=>i+1,true], ['Distributor','distributor',false,'distributor'],
+          ['Gross · USD',r=>money(r.revenue),true,'revenue'], ['Movies',r=>fmt(r.movies),true,'movies']
+        ], data.distributors, 'distributor');
+      } catch (error) { if (error.name !== 'AbortError') $('error').textContent = error.message; }
+      finally { if (request === activeRequest) { activeRequest = null; button.disabled = false; button.textContent = 'Apply filters'; } }
     }
 
     $('filters').addEventListener('submit', event => { event.preventDefault(); refresh(); });
-    function downloadCsv(filename, rows, columns) {
+    for (const kind of sortKinds) {
+      updateDirection(kind);
+      $(`${kind}-sort`).addEventListener('change', () => {
+        sortDirection[kind] = ['revenue','periods','reported_days','imdb_rating','movies','release_year'].includes($(`${kind}-sort`).value) ? 'desc' : 'asc';
+        updateDirection(kind);
+        refresh();
+      });
+      $(`${kind}-dir`).addEventListener('click', () => changeSort(kind, $(`${kind}-sort`).value));
+    }
+    function downloadCsv(filename, rows, columns, sourceKeys = {}) {
       if (!rows.length) return;
       const quote = value => `"${String(value ?? '').replaceAll('"','""')}"`;
-      const csv = [columns.join(','), ...rows.map(row => columns.map(key => quote(row[key])).join(','))].join('\r\n');
+      const csv = [columns.join(','), ...rows.map(row => columns.map(key => quote(row[sourceKeys[key] || key])).join(','))].join('\r\n');
       const link = document.createElement('a');
       link.href = URL.createObjectURL(new Blob(['\ufeff',csv],{type:'text/csv;charset=utf-8'}));
       link.download = filename; link.click();
       setTimeout(() => URL.revokeObjectURL(link.href), 1000);
     }
     $('download').addEventListener('click', () => downloadCsv('release_period_ranking.csv', latestMovies,
-      ['movie','revenue','reported_days','genre','imdb_rating','match_status']));
+      ['movie','revenue_usd','reported_days','genre','imdb_rating','match_status'], {revenue_usd:'revenue'}));
     $('download-films').addEventListener('click', () => downloadCsv('confirmed_film_ranking.csv', latestFilms,
-      ['film','imdb_id','release_year','revenue','periods','reported_days','genre','imdb_rating']));
+      ['film','imdb_id','release_year','revenue_usd','periods','reported_days','genre','imdb_rating'], {revenue_usd:'revenue'}));
     (async () => {
       try {
         const response = await fetch('/api/meta');
