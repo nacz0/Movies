@@ -26,6 +26,14 @@ Open [http://127.0.0.1:8501/](http://127.0.0.1:8501/). The default database is `
 
 The database and `.env` are ignored by Git. Reimporting the same CSV retains matched periods, saved OMDb responses and the request history. `python -m pipeline.enrich_omdb --offline` reuses saved title responses for eligible periods without an API key or new requests.
 
+Enrichment uses one worker by default. To allow up to four simultaneous OMDb requests:
+
+```powershell
+.\.venv\Scripts\python.exe -m pipeline.enrich_omdb --workers 4 --limit 100
+```
+
+Run one enrichment process at a time. Run and daily request limits still apply, including fallbacks, timeouts and interrupted requests. An invalid key or exhausted quota stops new requests; calls already in flight may finish. With a small budget, worker count can affect which periods get processed before the limit is reached.
+
 To revisit ambiguous periods, stop the dashboard and run:
 
 ```powershell
@@ -33,6 +41,14 @@ To revisit ambiguous periods, stop the dashboard and run:
 ```
 
 When a title-only response has an incompatible release year, the pipeline makes one additional query using the year of the first revenue record. The same matching rules still apply. Each network request counts toward both `--limit` and the daily cap. If the fallback is unavailable, unsuccessful or uncertain, the period stays `ambiguous`; rerun with `--retry-ambiguous` after a limit or temporary error. Cached results can also be reviewed with `--retry-ambiguous --offline`.
+
+## Enrichment performance
+
+- **Faster metadata updates:** four workers reduced median enrichment time from **6.80 s to 1.93 s (3.52×, 72% less waiting)** in a controlled test of 24 titles at 200 ms per response, with one warmup and five measured runs. Actual OMDb times depend on the service.
+- **The same API allowance:** concurrency shortens processing time; the daily cap stays unchanged. Shared responses and saved cache avoid spending requests repeatedly on the same title.
+- **Consistent analysis:** matching rules and revenue totals were preserved. All 29 tests and 24 comparisons of business data with the original implementation passed. Reimport time was effectively unchanged.
+
+A live OMDb check on **19 October 2026** matched **four reporting periods for three films using four requests**, with up to three requests in parallel. One request served both *The Matrix* periods; a year fallback selected *The Lion King (2019)*. Reprocessing offline reproduced the same matches with **zero new requests**. This confirms the integration works on a small sample; the main database was unchanged.
 
 ## Data and model
 
@@ -115,3 +131,13 @@ The following observations use all revenue records in the fact table, regardless
 ```
 
 The import checks required fields, duplicate IDs and duplicate date/title/distributor groups, then reconciles fact count, total revenue and missing theater counts with the CSV in one transaction. Reloads preserve saved OMDb responses and reject a change that moves already-enriched source rows to a different reporting period. OMDb metadata is user-maintained and title matching can be wrong, so ambiguous periods remain separate.
+
+To reproduce the network-free measurements and data comparison:
+
+```powershell
+.\.venv\Scripts\python.exe -m benchmarks.benchmark_pipeline --revision ad01f37 --workers 1 --output benchmarks/results/baseline.json
+.\.venv\Scripts\python.exe -m benchmarks.benchmark_pipeline --workers 1 2 4 8 --output benchmarks/results/concurrency.json
+.\.venv\Scripts\python.exe -m benchmarks.verify_equivalence
+```
+
+Raw results stay local in the Git-ignored `benchmarks/results/`. The optional `python -m benchmarks.smoke_omdb` uses the configured key for a live check, with a shared maximum of four requests per rolling 24 hours. Its request ledger stays in `benchmarks/results/live_omdb.duckdb`; retain it so repeat runs respect the budget.

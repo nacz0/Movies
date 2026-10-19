@@ -10,7 +10,9 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections import Counter
+from collections import Counter, deque
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -20,6 +22,8 @@ import duckdb
 from pipeline.load_revenues import ROOT
 
 MAX_DAILY_CAP = 900
+FATAL_STATUSES = {'invalid_key', 'quota_exhausted'}
+CACHEABLE_STATUSES = {'matched', 'ambiguous', 'not_found'}
 
 
 class OmdbHttpError(ConnectionError):
@@ -132,139 +136,265 @@ def _save_response(con, movie_key: int, payload: dict, status: str, reason: str,
                     [status, movie_key])
 
 
-def enrich(db_path: Path, api_key: str | None, *, limit: int = 2,
-           daily_cap: int = MAX_DAILY_CAP, retry_not_found: bool = False,
-           retry_ambiguous: bool = False, fetcher=fetch_title) -> dict:
-    if not 1 <= limit <= MAX_DAILY_CAP or not 1 <= daily_cap <= MAX_DAILY_CAP:
-        raise ValueError("limit and daily-cap must be between 1 and 900")
-    if not db_path.is_file():
-        raise FileNotFoundError("Run the CSV loader first")
-    if retry_not_found and retry_ambiguous:
-        raise ValueError("Choose either retry-not-found or retry-ambiguous")
-    counts = Counter()
-    with duckdb.connect(str(db_path)) as con:
-        con.execute((ROOT / "sql/omdb.sql").read_text(encoding="utf-8"))
-        candidates = con.execute("""
-            SELECT m.movie_key, m.source_title,
-                   year(m.run_start_date), year(m.run_end_date), sum(f.revenue)
-            FROM dim_movie m JOIN fact_daily_revenue f USING (movie_key)
-            WHERE (? AND m.match_status = 'not_found')
-               OR (? AND m.match_status = 'ambiguous')
-               OR (NOT ? AND NOT ? AND m.match_status IN ('pending', 'retry_later'))
-            GROUP BY 1, 2, 3, 4 ORDER BY 5 DESC, 2
-        """, [retry_not_found, retry_ambiguous, retry_not_found, retry_ambiguous]).fetchall()
-        # Existing title-only responses remain usable after the schema upgrade.
-        cached_keys = set(con.execute(
-            'SELECT source_title, query_year FROM omdb_query_cache'
-        ).fetchall())
-        for title, year, response, fetched_at in con.execute("""
-            SELECT m.source_title, coalesce(l.query_year, 0),
-                   l.response_json, l.fetched_at_utc
-            FROM omdb_lookup l JOIN dim_movie m USING (movie_key)
-            WHERE l.response_json IS NOT NULL
-              AND l.lookup_status IN ('matched', 'ambiguous', 'not_found')
-            ORDER BY l.fetched_at_utc DESC
-        """).fetchall():
-            if (title, year) not in cached_keys:
-                con.execute('INSERT INTO omdb_query_cache VALUES (?, ?, ?, ?)',
-                            [title, year, response, fetched_at])
-                cached_keys.add((title, year))
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
-        def request(movie_key, title, first_year, last_year, year=None):
-            cached = None if retry_not_found else con.execute(
-                "SELECT response_json, fetched_at_utc FROM omdb_query_cache "
-                "WHERE source_title = ? AND query_year = ?", [title, year or 0]
-            ).fetchone()
+
+@dataclass(frozen=True)
+class Candidate:
+    movie_key: int
+    title: str
+    first_year: int
+    last_year: int
+
+
+@dataclass
+class FetchResult:
+    payload: dict | None
+    error_status: str | None = None
+    http_status: int | None = None
+
+
+@dataclass
+class Query:
+    owner: Candidate
+    year: int | None
+    fetched_at: datetime
+    future: Future | None = None
+    request_id: str | None = None
+    result: FetchResult | None = None
+
+
+def _fetch(fetcher, title, api_key, year) -> FetchResult:
+    """Worker boundary: no database access, classification or budget decisions."""
+    try:
+        payload = fetcher(title, api_key, year)
+        if not isinstance(payload, dict):
+            raise ValueError("OMDb returned an invalid response")
+        return FetchResult(payload)
+    except OmdbHttpError as exc:
+        return FetchResult(None, 'invalid_key' if exc.status in (401, 403) else 'retry_later', exc.status)
+    except (ConnectionError, TimeoutError, ValueError):
+        return FetchResult(None, 'retry_later')
+
+
+def _classification(result: FetchResult, candidate: Candidate) -> tuple[str, str]:
+    if result.error_status:
+        return result.error_status, ('OMDb rejected the key' if result.error_status == 'invalid_key'
+                                     else 'OMDb request failed')
+    return classify(result.payload, candidate.title, candidate.first_year, candidate.last_year)
+
+
+def _candidates(con, retry_not_found, retry_ambiguous):
+    rows = con.execute("""
+        SELECT m.movie_key, m.source_title,
+               year(m.run_start_date), year(m.run_end_date), sum(f.revenue)
+        FROM dim_movie m JOIN fact_daily_revenue f USING (movie_key)
+        WHERE (? AND m.match_status = 'not_found')
+           OR (? AND m.match_status = 'ambiguous')
+           OR (NOT ? AND NOT ? AND m.match_status IN ('pending', 'retry_later'))
+        GROUP BY 1, 2, 3, 4 ORDER BY 5 DESC, 2, 1
+    """, [retry_not_found, retry_ambiguous, retry_not_found, retry_ambiguous]).fetchall()
+    return [Candidate(*row[:4]) for row in rows]
+
+
+def _upgrade_cache(con):
+    cached_keys = set(con.execute('SELECT source_title, query_year FROM omdb_query_cache').fetchall())
+    for title, year, response, fetched_at in con.execute("""
+        SELECT m.source_title, coalesce(l.query_year, 0), l.response_json, l.fetched_at_utc
+        FROM omdb_lookup l JOIN dim_movie m USING (movie_key)
+        WHERE l.response_json IS NOT NULL
+          AND l.lookup_status IN ('matched', 'ambiguous', 'not_found')
+        ORDER BY l.fetched_at_utc DESC, m.movie_key
+    """).fetchall():
+        if (title, year) not in cached_keys:
+            con.execute('INSERT INTO omdb_query_cache VALUES (?, ?, ?, ?)',
+                        [title, year, response, fetched_at])
+            cached_keys.add((title, year))
+
+
+class RequestCoordinator:
+    """The calling thread owns DuckDB, reservations and the bounded HTTP window."""
+
+    def __init__(self, con, executor, api_key, fetcher, clock, limit, daily_cap,
+                 retry_not_found, counts):
+        self.con, self.executor = con, executor
+        self.api_key, self.fetcher, self.clock = api_key, fetcher, clock
+        self.limit, self.daily_cap = limit, daily_cap
+        self.retry_not_found, self.counts = retry_not_found, counts
+        self.active = {}
+        self.stopped = False
+        self.request_statuses = Counter()
+        self.cache = {(title, year): (response, fetched_at)
+                      for title, year, response, fetched_at in con.execute(
+                          'SELECT * FROM omdb_query_cache').fetchall()}
+
+    def now(self):
+        now = self.clock()
+        if now.tzinfo is not None:
+            now = now.astimezone(timezone.utc).replace(tzinfo=None)
+        return now
+
+    def used_budget(self, now):
+        # Inclusive boundary preserves the existing rolling-window convention.
+        return self.con.execute(
+            'SELECT count(*) FROM omdb_request_log WHERE requested_at_utc >= ?',
+            [now - timedelta(hours=24)]).fetchone()[0]
+
+    def observe_fatal(self):
+        # Inspect completed responses before submitting anything else, even when
+        # an earlier logical candidate is still running. Persistence stays ordered.
+        for query in self.active.values():
+            if query.future.done():
+                result = query.future.result()
+                if _classification(result, query.owner)[0] in FATAL_STATUSES:
+                    self.stopped = True
+
+    def request(self, candidate, year=None):
+        key = (candidate.title, year or 0)
+        if not self.retry_not_found:
+            cached = self.cache.get(key)
             if cached:
-                payload = json.loads(cached[0])
-                status, reason = classify(payload, title, first_year, last_year)
-                counts["cache_reused"] += 1
-                return payload, status, reason, cached[1]
-            if not api_key or counts["requests"] >= limit:
-                return None
-            cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).replace(tzinfo=None)
-            used = con.execute("""
-                SELECT count(*) FROM omdb_request_log WHERE requested_at_utc >= ?
-            """, [cutoff]).fetchone()[0]
-            if used >= daily_cap:
-                counts["budget_stop"] += 1
-                return None
-            request_id = str(uuid4())
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
-            con.execute("""
-                INSERT INTO omdb_request_log
-                (request_id, movie_key, requested_at_utc, request_status, http_status, request_kind)
-                VALUES (?, ?, ?, 'reserved', NULL, ?)
-            """, [request_id, movie_key, now, 'title' if year is None else f'title_year:{year}'])
-            counts["requests"] += 1
+                self.counts['cache_reused'] += 1
+                return Query(candidate, year, cached[1], result=FetchResult(json.loads(cached[0])))
+            if key in self.active:
+                self.counts['cache_reused'] += 1
+                self.counts['coalesced'] += 1
+                return self.active[key]
+        self.observe_fatal()
+        if self.stopped or not self.api_key or self.counts['requests'] >= self.limit:
+            return None
+        now = self.now()
+        if self.used_budget(now) >= self.daily_cap:
+            self.counts['budget_stop'] += 1
+            return None
+        request_id = str(uuid4())
+        # Autocommit before submit: a crash or rollback cannot refund a request.
+        self.con.execute("""
+            INSERT INTO omdb_request_log
+            (request_id, movie_key, requested_at_utc, request_status, http_status, request_kind)
+            VALUES (?, ?, ?, 'reserved', NULL, ?)
+        """, [request_id, candidate.movie_key, now,
+              'title' if year is None else f'title_year:{year}'])
+        self.counts['requests'] += 1
+        query = Query(candidate, year, now, request_id=request_id)
+        query.future = self.executor.submit(_fetch, self.fetcher, candidate.title, self.api_key, year)
+        # Retry-not-found deliberately bypasses both persistent and shared cache.
+        self.active[request_id if self.retry_not_found else key] = query
+        return query
+
+    def resolve(self, query, candidate):
+        if query.result is None:
+            result = query.future.result()
+            status, _ = _classification(result, query.owner)
+            self.con.execute('BEGIN TRANSACTION')
             try:
-                payload = fetcher(title, api_key, year)
-                if not isinstance(payload, dict):
-                    raise ValueError("OMDb returned an invalid response")
-                status, reason = classify(payload, title, first_year, last_year)
-            except OmdbHttpError as exc:
-                payload = None
-                status = "invalid_key" if exc.status in (401, 403) else "retry_later"
-                reason = "OMDb rejected the key" if status == "invalid_key" else "OMDb HTTP error"
-            except (ConnectionError, ValueError, json.JSONDecodeError):
-                payload, status, reason = None, "retry_later", "OMDb request failed"
-            con.execute("BEGIN TRANSACTION")
-            try:
-                con.execute("""
-                    UPDATE omdb_request_log SET request_status = ? WHERE request_id = ?
-                """, [status, request_id])
-                if payload is not None and status in ('matched', 'ambiguous', 'not_found'):
-                    con.execute("""
+                self.con.execute(
+                    'UPDATE omdb_request_log SET request_status = ?, http_status = ? WHERE request_id = ?',
+                    [status, result.http_status, query.request_id])
+                if result.payload is not None and status in CACHEABLE_STATUSES:
+                    response_json = json.dumps(result.payload, ensure_ascii=False)
+                    self.con.execute("""
                         INSERT INTO omdb_query_cache VALUES (?, ?, ?, ?)
                         ON CONFLICT (source_title, query_year) DO UPDATE SET
                             response_json = excluded.response_json,
                             fetched_at_utc = excluded.fetched_at_utc
-                    """, [title, year or 0, json.dumps(payload, ensure_ascii=False), now])
-                con.execute("COMMIT")
-            except Exception:
-                con.execute("ROLLBACK")
+                    """, [query.owner.title, query.year or 0,
+                          response_json, query.fetched_at])
+                self.con.execute('COMMIT')
+            except BaseException:
+                self.con.execute('ROLLBACK')
                 raise
-            counts[status] += 1
-            return payload, status, reason, now
+            query.result = result
+            if result.payload is not None and status in CACHEABLE_STATUSES:
+                self.cache[(query.owner.title, query.year or 0)] = (response_json, query.fetched_at)
+            key = query.request_id if self.retry_not_found else (query.owner.title, query.year or 0)
+            del self.active[key]
+            self.counts[status] += 1  # Keep the existing request counters compatible.
+            self.request_statuses[status] += 1
+            if status in FATAL_STATUSES:
+                self.stopped = True
+        status, reason = _classification(query.result, candidate)
+        return query.result.payload, status, reason, query.fetched_at
 
-        for movie_key, title, first_year, last_year, _ in candidates:
-            result = request(movie_key, title, first_year, last_year)
-            if result is None:
-                continue
-            payload, status, reason, fetched_at = result
-            if status in ("quota_exhausted", "invalid_key"):
-                break
-            query_year = None
-            # Only a release-year mismatch warrants one extra, narrower query.
-            if (status == 'ambiguous' and reason == 'Release year needs review'
-                    and not 0 <= first_year - int(payload['Year']) <= 2):
-                fallback = request(movie_key, title, first_year, last_year, first_year)
-                if fallback is not None and fallback[1] == 'matched':
-                    payload, status, reason, fetched_at = fallback
-                    query_year = first_year
-                # An unsuccessful fallback must not turn an uncertain candidate
-                # into "not found" or attach unverified metadata.
-                stop = fallback is not None and fallback[1] in ('quota_exhausted', 'invalid_key')
-            else:
-                stop = False
-            con.execute('BEGIN TRANSACTION')
-            try:
-                if payload is not None:
-                    _save_response(con, movie_key, payload, status, reason, fetched_at, query_year)
-                elif status == 'retry_later':
-                    con.execute("UPDATE dim_movie SET match_status = ? WHERE movie_key = ?",
-                                [status, movie_key])
-                con.execute('COMMIT')
-            except Exception:
-                con.execute('ROLLBACK')
-                raise
-            if stop:
-                break
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).replace(tzinfo=None)
-        counts["requests_last_24h"] = con.execute("""
-            SELECT count(*) FROM omdb_request_log WHERE requested_at_utc >= ?
-        """, [cutoff]).fetchone()[0]
-    return dict(counts)
+
+def _save_period(con, candidate, result, query_year):
+    payload, status, reason, fetched_at = result
+    con.execute('BEGIN TRANSACTION')
+    try:
+        if payload is not None:
+            _save_response(con, candidate.movie_key, payload, status, reason, fetched_at, query_year)
+        elif status == 'retry_later':
+            con.execute('UPDATE dim_movie SET match_status = ? WHERE movie_key = ?',
+                        [status, candidate.movie_key])
+        con.execute('COMMIT')
+    except BaseException:
+        con.execute('ROLLBACK')
+        raise
+
+
+def enrich(db_path: Path, api_key: str | None, *, limit: int = 2,
+           daily_cap: int = MAX_DAILY_CAP, retry_not_found: bool = False,
+           retry_ambiguous: bool = False, fetcher=fetch_title, workers: int = 1,
+           clock=_utcnow) -> dict:
+    if not 1 <= limit <= MAX_DAILY_CAP or not 1 <= daily_cap <= MAX_DAILY_CAP:
+        raise ValueError('limit and daily-cap must be between 1 and 900')
+    if not isinstance(workers, int) or isinstance(workers, bool) or workers < 1:
+        raise ValueError('workers must be a positive integer')
+    if not db_path.is_file():
+        raise FileNotFoundError('Run the CSV loader first')
+    if retry_not_found and retry_ambiguous:
+        raise ValueError('Choose either retry-not-found or retry-ambiguous')
+    counts, period_statuses = Counter(), Counter()
+    with duckdb.connect(str(db_path)) as con:
+        con.execute((ROOT / 'sql/omdb.sql').read_text(encoding='utf-8'))
+        candidates = iter(_candidates(con, retry_not_found, retry_ambiguous))
+        _upgrade_cache(con)
+        executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix='omdb')
+        coordinator = RequestCoordinator(con, executor, api_key, fetcher, clock, limit,
+                                         daily_cap, retry_not_found, counts)
+        pending = deque()
+        exhausted = False
+        try:
+            while True:
+                while (not exhausted and not coordinator.stopped
+                       and len(coordinator.active) < workers
+                       and (not pending or pending[0][1].result is None)):
+                    candidate = next(candidates, None)
+                    if candidate is None:
+                        exhausted = True
+                        break
+                    query = coordinator.request(candidate)
+                    if query is not None:
+                        pending.append((candidate, query))
+                        # Resolve a cached result now, so its fallback has priority
+                        # over title requests that have not yet been submitted.
+                        if query.result is not None:
+                            break
+                if not pending:
+                    break
+                candidate, query = pending.popleft()
+                result = coordinator.resolve(query, candidate)
+                payload, status, reason, _ = result
+                if status in FATAL_STATUSES:
+                    continue
+                query_year = None
+                if (status == 'ambiguous' and reason == 'Release year needs review'
+                        and not 0 <= candidate.first_year - int(payload['Year']) <= 2):
+                    fallback = coordinator.request(candidate, candidate.first_year)
+                    if fallback is not None:
+                        fallback_result = coordinator.resolve(fallback, candidate)
+                        if fallback_result[1] == 'matched':
+                            result, query_year = fallback_result, candidate.first_year
+                _save_period(con, candidate, result, query_year)
+                period_statuses[result[1]] += 1
+        finally:
+            # Interruptions never submit more work. Outstanding reservations stay
+            # charged; completed period transactions are already durable.
+            executor.shutdown(wait=True, cancel_futures=True)
+        counts['requests_last_24h'] = coordinator.used_budget(coordinator.now())
+    return dict(counts, request_statuses=dict(coordinator.request_statuses),
+                period_statuses=dict(period_statuses))
 
 
 def main() -> None:
@@ -272,6 +402,7 @@ def main() -> None:
     parser.add_argument("--db", type=Path, default=ROOT / "data/box_office.duckdb")
     parser.add_argument("--limit", type=int, default=2)
     parser.add_argument("--daily-cap", type=int, default=MAX_DAILY_CAP)
+    parser.add_argument("--workers", type=int, default=1, help="Maximum concurrent OMDb requests (default: 1)")
     retry = parser.add_mutually_exclusive_group()
     retry.add_argument("--retry-not-found", action="store_true")
     retry.add_argument("--retry-ambiguous", action="store_true")
@@ -279,6 +410,7 @@ def main() -> None:
     args = parser.parse_args()
     print(json.dumps(enrich(args.db, None if args.offline else load_api_key(),
                             limit=args.limit, daily_cap=args.daily_cap,
+                            workers=args.workers,
                             retry_not_found=args.retry_not_found,
                             retry_ambiguous=args.retry_ambiguous), indent=2))
 

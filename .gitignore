@@ -1,6 +1,21 @@
+# Local editor settings
+.vscode/
+
+# Python environment and generated files
 .venv/
 __pycache__/
+*.py[cod]
 .pytest_cache/
+
+# Local credentials; keep the example configuration
 .env
-data/*.duckdb
-data/*.duckdb.wal
+.env.*
+!.env.example
+
+# Local databases, journals and spill directories (including custom --db paths)
+*.duckdb
+*.duckdb.wal
+*.duckdb.tmp/
+
+# Generated benchmark output
+/benchmarks/results/
