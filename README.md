@@ -1,117 +1,147 @@
-# Daily box office ranking
+# Movies: Python concurrency + dbt + DuckDB
 
-A local Python + DuckDB pipeline loads daily revenue from `revenues_per_day.csv`, enriches reporting periods with [OMDb](https://www.omdbapi.com/), and serves a ranking dashboard. Verified with Python 3.12.8 and DuckDB 1.5.1.
+A local educational data pipeline and box office dashboard. Python validates CSV snapshots and fetches OMDb metadata; dbt owns reporting periods, the star schema, lineage and data tests. DuckDB stores both. Use Python 3.12 and the runtime versions pinned in `requirements.txt`.
 
-![Box office ranking dashboard](docs/dashboard.png)
+![Dashboard](docs/dashboard.png)
 
-## Run
+```mermaid
+flowchart LR
+    CSV[Revenue CSV] --> I[Python: validate + atomic import]
+    I --> R[(raw_revenues)]
+    R --> S[dbt staging]
+    S --> P[dbt periods + candidates]
+    P --> E[Python: concurrent HTTP workers]
+    O[OMDb API] --> E
+    C[(Request cache + budget)] <--> E
+    E --> M[(Current classifications)]
+    P --> D[dbt dimensions + fact]
+    M --> D
+    D --> T[dbt quality tests]
+    T --> UI[Existing dashboard]
+```
 
-On Windows PowerShell:
+## Setup and commands
+
+Windows PowerShell:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m pipeline.load_revenues
-Copy-Item .env.example .env
+.\.venv\Scripts\Activate.ps1
+python -m pip install --only-binary=:all: -r requirements.txt
+python -m pipeline.run --csv revenues_per_day.csv --offline
+python -m dashboard.server
 ```
 
-Put your [free OMDb key](https://www.omdbapi.com/apikey.aspx) in `.env` as `OMDB_API_KEY=...`, then run:
+Linux/macOS: activate with `source .venv/bin/activate`; the remaining commands are identical. Open [localhost:8501](http://127.0.0.1:8501/). Stop the dashboard before pipeline/dbt commands. The new default is **`data/movies.duckdb`**, separate from older `data/box_office.duckdb` files. Pipeline and dashboard commands accept `--db`.
 
 ```powershell
-.\.venv\Scripts\python.exe -m pipeline.enrich_omdb --limit 100
-.\.venv\Scripts\python.exe -m dashboard.server
+# Rebuild and revalidate cache, without network access (also the default mode)
+python -m pipeline.run --offline
+
+# Opt into HTTP: set OMDB_API_KEY in the environment or copy .env.example to .env
+python -m pipeline.run --enrich --workers 4 --limit 100 --daily-cap 900
+
+# Replace the complete snapshot, including corrections and deletions
+python -m pipeline.run --csv revenues_per_day.csv --offline
+
+# Isolated development database
+python -m pipeline.run --csv tests/fixtures/revenues.csv --db data/dev.duckdb
+python -m dashboard.server --db data/dev.duckdb --port 8502
+
+# Python tests include real dbt builds/tests and local dashboard HTTP checks
+python -m unittest discover -s tests -v
+
+# Full CSV acceptance test: builds twice, compares every mart row, blocks HTTP
+python -m tests.verify_full --db data/full-check.duckdb
 ```
 
-Open [http://127.0.0.1:8501/](http://127.0.0.1:8501/). The default database is `data/box_office.duckdb`; both pipeline commands accept `--db`. The CSV loader also accepts `--csv`. Stop the dashboard before a command writes to the same database.
+`.env`, keys, databases, journals and generated dbt output are ignored by Git. The dashboard's only change from `main` is its default database filename; filters, sorting, rankings and both CSV downloads retain the existing implementation.
 
-The database and `.env` are ignored by Git. Reimporting the same CSV retains matched periods, saved OMDb responses and the request history. `python -m pipeline.enrich_omdb --offline` reuses saved title responses for eligible periods without an API key or new requests.
+## Responsibilities and lineage
 
-To revisit ambiguous periods, stop the dashboard and run:
+| Component | Owns |
+| --- | --- |
+| `pipeline/ingest.py` | Strict CSV validation; transactional snapshot replacement |
+| `pipeline/enrich.py` | HTTP, conservative matching, cache, budget reservations and optional legacy cache copy |
+| `pipeline/run.py` | CLI, step ordering, dbt invocation and failure propagation |
+| `dbt/models/` | All analytical transformations, dimensions, facts and documentation |
+| `dashboard/` | Read-only queries and presentation |
+
+dbt uses ordinary `source()` and `ref()`, with **no custom macros**. All models live in DuckDB's `main` schema; directories express the layers.
+
+```text
+source('python', 'raw_revenues') -> stg_revenues
+  -> int_title_dates -> int_reporting_period_dates -> int_reporting_periods
+  -> int_revenue_periods (joins dates + periods) -> int_omdb_candidates
+  -> dim_date / dim_distributor
+source('python', 'omdb_matches') -> stg_omdb_matches
+int_reporting_periods + stg_omdb_matches -> dim_movie
+int_revenue_periods + all three dimensions -> fact_daily_revenue
+```
+
+Staging and small intermediate models are views. Reused period/assignment models and the four marts are full-refresh tables. Python runs `dbt run --select +int_omdb_candidates`, reclassifies current periods from cache/optional HTTP, then runs `dbt build`. All Python connections close before dbt opens the file. dbt makes SQL dependencies, lineage and quality tests visible independently of HTTP code.
+
+For direct dbt commands, select an absolute database path. The committed profile has no secrets:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pipeline.enrich_omdb --retry-ambiguous --limit 100
+$env:MOVIES_DBT_PATH = (Resolve-Path data/dev.duckdb).Path
+$env:DBT_SEND_ANONYMOUS_USAGE_STATS = 'false'
+dbt debug --project-dir dbt --profiles-dir dbt
+dbt build --project-dir dbt --profiles-dir dbt
+dbt test --project-dir dbt --profiles-dir dbt
+dbt docs generate --project-dir dbt --profiles-dir dbt
+dbt docs serve --project-dir dbt --profiles-dir dbt
 ```
 
-When a title-only response has an incompatible release year, the pipeline makes one additional query using the year of the first revenue record. The same matching rules still apply. Each network request counts toward both `--limit` and the daily cap. If the fallback is unavailable, unsuccessful or uncertain, the period stays `ambiguous`; rerun with `--retry-ambiguous` after a limit or temporary error. Cached results can also be reviewed with `--retry-ambiguous --offline`.
+On Linux/macOS use `export MOVIES_DBT_PATH="$(pwd)/data/dev.duckdb"` and `export DBT_SEND_ANONYMOUS_USAGE_STATS=false`. Use the Python runner after CSV changes: direct dbt builds do not reclassify metadata. A boundary mismatch yields `pending` until Python revalidates it. Runner artifacts are separated by database path under `dbt/target/` and `dbt/logs/`; direct commands use the default directories.
 
-## Data and model
+## Data and identifiers
 
-The CSV contains **337,818 rows**, **6,545 distinct titles**, **363 distributors**, and **8,455 dates** from **2000-01-01 to 2023-03-06**. Total box office gross is **$205,110,995,141**; 161 theater counts are missing. The CSV has no explicit currency or market metadata, but its **Avengers: Endgame** rows sum to **$858,373,000**, matching the published [domestic theatrical gross](https://www.boxofficemojo.com/title/tt4154796/) exactly. The dashboard therefore treats `revenue` as nominal **USD domestic theatrical box office gross**, covering the **US and Canada** ([Box Office Mojo's definition](https://www.boxofficemojo.com/article/ed3547792388/)). It is ticket sales, not distributor profit or worldwide revenue. This interpretation has not been verified for every CSV row.
+The CSV has **337,818 rows**, **6,545 titles**, **363 distributors**, **8,455 dates** and gross **$205,110,995,141**. Dates span 2000-01-01 to 2023-03-06; 161 theater counts are missing. Revenue retains the dashboard's interpretation of nominal USD domestic theatrical gross (US and Canada). The CSV itself specifies neither currency nor market.
 
-The fact grain is one CSV row for a title, distributor and day. `revenue` is additive. `theaters` is a row-level value and should not be summed as a count of unique cinemas. A title starts a new reporting period after more than 180 days without a revenue record. This is a heuristic for separating likely rereleases or remakes, not proof of film identity.
+Each fact retains its exact source ID, integer revenue and nullable theaters. Revenue is additive; theaters must not be summed as unique cinemas. A title starts another reporting period after a gap **strictly greater than 180 days**, over distinct title/date pairs independently of distributor. Unmatched/ambiguous metadata never removes revenue.
 
-```mermaid
-erDiagram
-    dim_date ||--o{ fact_daily_revenue : date_key
-    dim_movie ||--o{ fact_daily_revenue : movie_key
-    dim_distributor ||--o{ fact_daily_revenue : distributor_key
-    dim_date {
-        INTEGER date_key PK
-        DATE calendar_date
-        INTEGER year
-        INTEGER quarter
-        INTEGER month
-        INTEGER day_of_week
-    }
-    dim_movie {
-        BIGINT movie_key PK
-        VARCHAR source_title
-        DATE run_start_date
-        DATE run_end_date
-        VARCHAR display_title
-        VARCHAR imdb_id
-        VARCHAR omdb_title
-        INTEGER release_year
-        VARCHAR primary_genre
-        DOUBLE imdb_rating
-        INTEGER runtime_minutes
-        VARCHAR match_status
-    }
-    dim_distributor {
-        BIGINT distributor_key PK
-        VARCHAR distributor_name
-    }
-    fact_daily_revenue {
-        VARCHAR source_id PK
-        INTEGER date_key FK
-        BIGINT movie_key FK
-        BIGINT distributor_key FK
-        BIGINT revenue
-        INTEGER theaters
-    }
-```
+Movie keys are full MD5 strings of the JSON array `[exact source_title, ISO run_start_date]`; distributor keys are full MD5 strings of exact distributor names. Date keys are YYYYMMDD integers. The dashboard does not require numeric movie/distributor keys. Uniqueness tests detect key collisions; no registries are needed.
 
-`raw_revenues` keeps the parsed CSV snapshot. `omdb_lookup` stores the selected response and classification for each queried period; `omdb_request_log` counts requests toward the safety cap. `omdb_query_cache` stores responses by source title and query year (0 means no year filter), keeping title-only and year-specific queries separate. Existing saved responses are copied into this cache automatically. Reused responses are checked again against the current period's dates. Only an exact normalized title and plausible release year become `matched`; all fact revenue stays in the model even without a match. The film ranking combines matched periods by IMDb ID. The release-period ranking includes every period.
+Historical records can move a period start or merge/split periods. A changed start produces a new key; a changed end invalidates the old classification join too. **Every pipeline run reclassifies all current periods** from request cache, checking title, release year, movie type, IMDb ID and the `Short` genre. Old matches are never transferred by key. A release year may be at most two years before the period's first year; periods spanning over three years remain ambiguous. A release-year mismatch permits one year-specific fallback using the first reporting year. Short films, shortened titles and uncertain results remain ambiguous. Only matched results populate metadata in `dim_movie`.
 
-Examples encountered during matching include **The Lion King** (2019 revenue versus a 1994 title-only candidate, resolved by the year-specific query), **Legally Blonde 2** (shortened source title versus the longer OMDb title, *Legally Blonde 2: Red, White & Blonde*), and **American Sniper** (revenue starting in December 2014 versus an OMDb year of 2015). The latter two remain ambiguous. These cases illustrate title collisions, title variations, and release-year discrepancies. Revenue remains in the model even when metadata cannot be assigned. Conservative matching can also reject valid candidates; these cases require review rather than automatic acceptance.
+Trade-off: period keys are reproducible for a fixed snapshot, **not permanent external identifiers**. Exported keys may change after historical corrections. Cache survives, but valid rereleases and title variations can remain ambiguous. Reporting periods are a heuristic, not proof of film identity. There is no manual override system.
 
-OMDb can return short films under `Type=movie`. Year-specific queries for **Coco (2020)** and **The Revenant (2015)** returned short films with matching titles and years. Candidates whose genre includes `Short` therefore remain `ambiguous` for manual review, even when title and year agree. This is a conservative rule for this dataset, not proof that all short-film revenue records are invalid.
+## Concurrency and durable state
 
-## Demonstration
+HTTP spends most of its time waiting, so `ThreadPoolExecutor` overlaps those waits. Workers only perform HTTP and decode responses. The caller alone reads/writes DuckDB, classifies periods and reserves budget. No shared database connection crosses into workers.
 
-The local database on 25 September 2026 had **6,661 periods**, of which **908 had been processed**: **878 matched**, **19 ambiguous**, **11 not found**, and **5,753 pending**. Matched periods covered **66.94% of source revenue**. This is coverage, not match accuracy.
+Bounded batches use four workers by default (configurable 1–32). Periods sharing a request title share a title-only request; year-specific fallbacks are deduplicated too. The exact title sent to OMDb is NFKC-normalized, casefolded and whitespace-collapsed. Punctuation and accents remain in the cache identity. Requests fix `type=movie`. The key is `(query_title, query_year)`, where zero denotes no year filter. Matching uses a separate title comparison.
 
-Rechecking the 34 ambiguous periods used **28 new API requests** and resolved **15 periods**, increasing revenue coverage from **65.77% to 66.94%** (1.17 percentage points; **$2.40 billion** of additional revenue linked to OMDb metadata). Two short-film candidates were excluded after response review. The total fact revenue did not change.
+Four Python-owned tables live in `movies_state`:
 
-Enrichment is intentionally partial due to the free OMDb API request limit. Subsequent runs continue processing pending titles while reusing cached responses. All CSV revenue records are loaded regardless of enrichment status. A clean checkout has no saved OMDb responses; `--limit 100` processes the highest-revenue pending periods first. The [free OMDb tier](https://www.omdbapi.com/apikey.aspx) lists 1,000 requests per day; this pipeline caps itself at 900 in a rolling 24-hour window. Use `--daily-cap` to set a lower ceiling.
+| Table | Purpose |
+| --- | --- |
+| `raw_revenues` | Validated current CSV snapshot |
+| `omdb_cache` | Reusable successful/not-found JSON responses by request identity |
+| `omdb_requests` | Timestamped reservations, including errors/interruption |
+| `omdb_matches` | Current classifications; replaceable derived state |
 
-Across the full source date range, the largest reporting period was **Star Wars: Episode VII - The Force Awakens** at **$935,644,139**. In 2019 the leader was **Avengers: Endgame** ($858,373,000); in 2022 it was **Top Gun: Maverick** ($716,981,130). **Walt Disney Studios Motion Pictures** contributed **17.32%** of gross across all dates. These statements use the complete fact table; the confirmed-film ranking is limited by OMDb coverage.
+Every HTTP call, including fallbacks, autocommits a reservation **before dispatch**. The inclusive rolling 24-hour count includes incomplete requests. `--limit` caps the run; `--daily-cap` caps the rolling window and cannot exceed 900. Timeouts, malformed/error responses and HTTP failures consume budget but are not cached. Invalid keys/quota stop new batches; in-flight calls may finish. Saved cache and budget survive interruption. A rerun retries uncached failures; there are no immediate automatic retries. Not-found responses stay cached. To refresh one, explicitly delete that request's cache row while the pipeline is stopped.
 
-Each ranking can be sorted independently by its visible columns in either direction. Sorting runs before the selected Top 10/20/50/100 limit, so the tables and their CSV exports reflect the full filtered dataset. The Top release periods chart always shows the ten highest grosses.
+Batches favor readability over maximum throughput: each waits for its slowest request. Cache has no TTL and reservations are retained indefinitely. Run one pipeline process at a time; DuckDB enforces a writer lock across processes. Budget assumes one API key per database; separate files and other OMDb clients do not share it.
 
-## Analytical observations
+## Existing databases and failures
 
-The following observations use all revenue records in the fact table, regardless of OMDb match status:
-
-- **Pandemic-era decline:** recorded gross fell from **$11.21 billion in 2019** to **$1.98 billion in 2020**, a decline of **82.3%**. The monthly series drops sharply in March and reaches just **$34,369 in April 2020**. The timing is consistent with disruption during the COVID-19 pandemic, but the CSV alone does not establish causation or completeness of market coverage.
-- **Gradual recovery:** recorded gross increased to **$4.07 billion in 2021** and **$7.27 billion in 2022**. The 2022 total remained **35.1% below 2019**, in nominal terms without inflation adjustment.
-- **Seasonality:** across 2000-2019, July had the highest average recorded daily gross (**$36.82 million**), followed by June (**$32.48 million**) and December (**$30.84 million**). Comparing daily averages accounts for differences in month length. The largest monthly total in the dataset was **July 2011: $1,380,301,220**.
-- **Incomplete final month:** the dataset ends on **6 March 2023**, so the last chart point contains only six days (**$136.25 million**). It should not be compared directly with full monthly totals or interpreted as another market collapse.
-
-## Verify
+Existing `main`/`dbt` databases are **refused**, not automatically migrated. Choose a new file. With old pipeline/dashboard processes stopped, optionally copy reusable cache and reservations:
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+python -m pipeline.run --csv revenues_per_day.csv --db data/new-movies.duckdb --reuse-cache-from data/box_office.duckdb --offline
 ```
 
-The import checks required fields, duplicate IDs and duplicate date/title/distributor groups, then reconciles fact count, total revenue and missing theater counts with the CSV in one transaction. Reloads preserve saved OMDb responses and reject a change that moves already-enriched source rows to a different reporting period. OMDb metadata is user-maintained and title matching can be wrong, so ambiguous periods remain separate.
+The source opens read-only. This supports legacy `main.omdb_query_cache` and `main.omdb_request_log` tables from `main`/`dbt`; it copies no classifications/keys. Reservations carry over conservatively and deduplicate by request ID. Use this once into a fresh destination; existing destination cache takes precedence. Keep the original file. Missing legacy tables cause a clear failure without modifying the source; there is no generic migration framework.
+
+CSV validation/replacement is transactional: bad/empty input leaves previous raw rows intact. dbt builds in place; tests must pass before success is reported. A failure stops the runner and preserves already saved cache/reservations. **The multi-model dbt build is not atomic.** After a failed build, keep the dashboard stopped, fix the issue and rerun before serving. No automatic backup/restore/resume framework is included.
+
+## Quality checks and CI
+
+Python tests use small fixtures and fake HTTP responses without OMDb secrets. They cover invalid/duplicate CSVs, large exact integers, corrections/deletions, idempotency, ambiguous matching, cache revalidation, offline mode, concurrency, budgets, failures/interruption, read-only legacy copying, SQL failure propagation and dashboard queries/HTTP routes.
+
+dbt tests enforce unique/non-null keys, relationships, accepted status/weekday values, valid revenue/theaters, and exact source-to-fact rows and grouped-gross reconciliation. Two SQL unit tests cover 180/181-day boundaries and distributor-independent date deduplication ([dbt documentation](https://docs.getdbt.com/docs/build/unit-tests)). Negative-control integration tests corrupt facts and confirm reconciliation and relationship failures are detected.
+
+GitHub Actions runs on Windows and Linux: pinned dependency installation, dependency checks, Python tests, an isolated offline fixture build and explicit dbt tests. It invokes the ordinary runner instead of the old migration/publication benchmark and requires no API secrets. The old workflow's unquoted install command contained `--only-binary=:all:` followed by a space, which is invalid YAML. The new workflow quotes it; the old parsing failure was reproduced locally. Hosted jobs have not been run from this local branch. See [executed validation and complexity comparison](docs/validation.md).

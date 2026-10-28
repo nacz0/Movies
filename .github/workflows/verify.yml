@@ -1,0 +1,33 @@
+name: Python and dbt
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      DBT_SEND_ANONYMOUS_USAGE_STATS: 'false'
+      MOVIES_DBT_PATH: ${{ github.workspace }}/data/ci.duckdb
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: 'python -m pip install --only-binary=:all: -r requirements.txt'
+      - run: python -m pip check
+      - run: python -m unittest discover -s tests -v
+      - run: python -m pipeline.run --csv tests/fixtures/revenues.csv --db data/ci.duckdb --offline
+      - run: dbt test --project-dir dbt --profiles-dir dbt
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: dbt-diagnostics-${{ matrix.os }}
+          path: |
+            dbt/logs/
+            dbt/target/

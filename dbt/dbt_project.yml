@@ -1,0 +1,17 @@
+name: movies
+version: '1.0.0'
+config-version: 2
+profile: movies
+model-paths: [models]
+test-paths: [tests]
+clean-targets: [target, dbt_packages]
+models:
+  movies:
+    +materialized: view
+    intermediate:
+      int_reporting_periods:
+        +materialized: table
+      int_revenue_periods:
+        +materialized: table
+    marts:
+      +materialized: table

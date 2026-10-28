@@ -1,0 +1,14 @@
+version: 2
+sources:
+  - name: python
+    schema: movies_state
+    description: Durable Python-owned snapshot, request cache, budget and current classifications.
+    tables:
+      - name: raw_revenues
+        description: Validated complete CSV snapshot; source IDs and integer gross remain exact.
+      - name: omdb_matches
+        description: Recomputed classifications; period start is encoded in movie_key and end is checked on join.
+      - name: omdb_cache
+        description: Reusable JSON by exact normalized request title and optional year (0 denotes no year).
+      - name: omdb_requests
+        description: Durable reservations created before dispatch, including failed and interrupted requests.

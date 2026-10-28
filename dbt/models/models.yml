@@ -1,0 +1,123 @@
+version: 2
+models:
+  - name: stg_revenues
+    description: Typed source snapshot; title text and IDs retain the original CSV values.
+    columns:
+      - name: source_id
+        data_tests: [unique, not_null]
+  - name: stg_omdb_matches
+    description: Selected JSON fields; only matched candidates can populate movie attributes.
+    columns:
+      - name: movie_key
+        data_tests: [unique, not_null]
+  - name: int_title_dates
+    description: Distinct title/date pairs, independent of distributor.
+  - name: int_reporting_period_dates
+    description: A gap strictly greater than 180 days starts a new reporting period.
+  - name: int_reporting_periods
+    description: Current periods; deterministic MD5 of the JSON array [source_title, ISO start date].
+    columns:
+      - name: movie_key
+        data_tests: [unique, not_null]
+  - name: int_revenue_periods
+    description: Every source row assigned to exactly one current period.
+    columns:
+      - name: source_id
+        data_tests: [unique, not_null]
+      - name: movie_key
+        data_tests: [not_null]
+  - name: int_omdb_candidates
+    description: Current periods prioritized by gross, before joining any OMDb data.
+    columns:
+      - name: movie_key
+        data_tests: [unique, not_null]
+  - name: dim_movie
+    description: Reporting periods including pending, ambiguous and unmatched titles; no revenue is filtered out.
+    columns:
+      - name: movie_key
+        data_tests: [unique, not_null]
+      - name: source_title
+        data_tests: [not_null]
+      - name: run_start_date
+        data_tests: [not_null]
+      - name: run_end_date
+        data_tests: [not_null]
+      - name: display_title
+        data_tests: [not_null]
+      - name: match_status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [pending, matched, ambiguous, not_found, retry_later]
+  - name: dim_date
+    description: Dates present in the current snapshot; YYYYMMDD integer keys and ISO weekdays.
+    columns:
+      - name: date_key
+        data_tests: [unique, not_null]
+      - name: calendar_date
+        data_tests: [unique, not_null]
+      - name: day_of_week
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5, 6, 7]
+                quote: false
+  - name: dim_distributor
+    description: Current distributors, with deterministic full MD5 keys.
+    columns:
+      - name: distributor_key
+        data_tests: [unique, not_null]
+      - name: distributor_name
+        data_tests: [unique, not_null]
+  - name: fact_daily_revenue
+    description: One row per exact CSV source ID; revenue is additive nominal USD domestic gross.
+    columns:
+      - name: source_id
+        data_tests: [unique, not_null]
+      - name: date_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: "ref('dim_date')", field: date_key}
+      - name: movie_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: "ref('dim_movie')", field: movie_key}
+      - name: distributor_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: "ref('dim_distributor')", field: distributor_key}
+      - name: revenue
+        data_tests: [not_null]
+      - name: theaters
+        description: Nullable row-level count; do not sum as unique cinemas.
+
+unit_tests:
+  - name: strict_180_day_boundary
+    model: int_reporting_period_dates
+    given:
+      - input: ref('int_title_dates')
+        rows:
+          - {source_title: Same, revenue_date: '2020-01-01', previous_date: null}
+          - {source_title: Same, revenue_date: '2020-06-29', previous_date: '2020-01-01'}
+          - {source_title: Same, revenue_date: '2020-12-27', previous_date: '2020-06-29'}
+    expect:
+      rows:
+        - {source_title: Same, revenue_date: '2020-01-01', run_number: 1}
+        - {source_title: Same, revenue_date: '2020-06-29', run_number: 1}
+        - {source_title: Same, revenue_date: '2020-12-27', run_number: 2}
+  - name: title_dates_ignore_distributor
+    model: int_title_dates
+    given:
+      - input: ref('stg_revenues')
+        rows:
+          - {source_id: a, source_title: Same, revenue_date: '2020-01-01', distributor_name: X, revenue: 10, theaters: 1}
+          - {source_id: b, source_title: Same, revenue_date: '2020-01-01', distributor_name: Y, revenue: 20, theaters: 2}
+          - {source_id: c, source_title: Same, revenue_date: '2020-06-29', distributor_name: X, revenue: 30, theaters: 3}
+    expect:
+      rows:
+        - {source_title: Same, revenue_date: '2020-01-01', previous_date: null}
+        - {source_title: Same, revenue_date: '2020-06-29', previous_date: '2020-01-01'}

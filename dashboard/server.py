@@ -124,7 +124,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db", type=Path, default=ROOT / "data" / "box_office.duckdb")
+    parser.add_argument("--db", type=Path, default=ROOT / "data" / "movies.duckdb")
     parser.add_argument("--port", type=int, default=8501)
     args = parser.parse_args()
     if not args.db.is_file():

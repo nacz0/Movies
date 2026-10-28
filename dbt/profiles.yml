@@ -1,0 +1,8 @@
+movies:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('MOVIES_DBT_PATH') }}"
+      schema: main
+      threads: 1
