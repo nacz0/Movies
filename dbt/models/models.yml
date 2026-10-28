@@ -1,0 +1,129 @@
+version: 2
+models:
+  - name: stg_revenues
+    description: Explicitly typed CSV rows, without title normalization.
+    columns:
+      - name: source_id
+        data_tests: [unique, not_null]
+  - name: stg_omdb_lookup
+    description: Selected operational movie state and response provenance, including statuses without payloads.
+    columns:
+      - name: movie_key
+        data_tests: [unique, not_null]
+  - name: int_title_dates
+    description: Unique dates per title, independent of distributor.
+  - name: int_reporting_period_dates
+    description: A gap strictly greater than 180 days starts a new reporting period.
+  - name: int_reporting_periods
+    description: Current period boundaries and existing display labels. Periods are a heuristic, not confirmed film identities.
+  - name: int_revenue_periods
+    description: Exactly one reporting-period assignment per CSV source_id.
+    columns:
+      - name: source_id
+        data_tests: [unique, not_null]
+      - name: run_start_date
+        data_tests: [not_null]
+  - name: int_omdb_candidates
+    description: Current periods with gross for priority ordering; independent of final marts.
+    columns:
+      - name: movie_key
+        data_tests: [unique, not_null]
+  - name: dim_date
+    description: Historical imported dates, YYYYMMDD keys and ISO weekdays (Monday=1).
+    columns:
+      - name: date_key
+        data_type: integer
+        data_tests: [unique, not_null]
+      - name: calendar_date
+        data_type: date
+        data_tests: [unique, not_null]
+      - name: year
+        data_type: integer
+      - name: quarter
+        data_type: integer
+      - name: month
+        data_type: integer
+      - name: day_of_week
+        data_type: integer
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5, 6, 7]
+                quote: false
+  - name: dim_distributor
+    description: All stable distributor keys, including distributors without current facts.
+    columns:
+      - name: distributor_key
+        data_type: bigint
+        data_tests: [unique, not_null]
+      - name: distributor_name
+        data_type: varchar
+        data_tests: [unique, not_null]
+  - name: dim_movie
+    description: Stable reporting periods and saved OMDb metadata. Unmatched gross remains in the fact table.
+    columns:
+      - name: movie_key
+        data_type: bigint
+        data_tests: [unique, not_null]
+      - name: source_title
+        data_type: varchar
+        data_tests: [not_null]
+      - name: run_start_date
+        data_type: date
+        data_tests: [not_null]
+      - name: run_end_date
+        data_type: date
+        data_tests: [not_null]
+      - name: display_title
+        data_type: varchar
+        data_tests: [not_null]
+      - name: imdb_id
+        data_type: varchar
+      - name: omdb_title
+        data_type: varchar
+      - name: release_year
+        data_type: integer
+      - name: primary_genre
+        data_type: varchar
+      - name: imdb_rating
+        data_type: double
+      - name: runtime_minutes
+        data_type: integer
+      - name: match_status
+        data_type: varchar
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [pending, matched, ambiguous, not_found, retry_later]
+  - name: fact_daily_revenue
+    description: One row per CSV source_id. Revenue is nominal USD domestic ticket gross; theaters is nullable and not additive.
+    columns:
+      - name: source_id
+        data_type: varchar
+        data_tests: [unique, not_null]
+      - name: date_key
+        data_type: integer
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: "ref('dim_date')", field: date_key}
+      - name: movie_key
+        data_type: bigint
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: "ref('dim_movie')", field: movie_key}
+      - name: distributor_key
+        data_type: bigint
+        data_tests:
+          - not_null
+          - relationships:
+              arguments: {to: "ref('dim_distributor')", field: distributor_key}
+      - name: revenue
+        description: Additive nominal USD gross.
+        data_type: bigint
+        data_tests: [not_null]
+      - name: theaters
+        description: Positive reported theaters or NULL; not a unique cinema count.
+        data_type: integer

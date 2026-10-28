@@ -1,6 +1,6 @@
 -- Existing responses stay available when the CSV is reloaded.
 CREATE TABLE IF NOT EXISTS omdb_lookup (
-    movie_key BIGINT PRIMARY KEY REFERENCES dim_movie(movie_key),
+    movie_key BIGINT PRIMARY KEY REFERENCES movie_registry(movie_key),
     lookup_status VARCHAR NOT NULL,
     candidate_imdb_id VARCHAR,
     candidate_title VARCHAR,

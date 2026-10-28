@@ -16,6 +16,14 @@ __pycache__/
 *.duckdb
 *.duckdb.wal
 *.duckdb.tmp/
+*.pipeline.lock
 
 # Generated benchmark output
 /benchmarks/results/
+
+# dbt generated output and private profiles
+/dbt/target/
+/dbt/logs/
+/dbt/dbt_packages/
+/dbt/profiles.yml
+/dbt/.user.yml

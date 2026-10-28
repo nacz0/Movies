@@ -1,0 +1,21 @@
+name: movies
+version: '1.0.0'
+config-version: 2
+profile: movies
+model-paths: [models]
+test-paths: [tests]
+macro-paths: [macros]
+clean-targets: [target, dbt_packages]
+models:
+  movies:
+    staging:
+      +schema: staging
+      +materialized: view
+    intermediate:
+      +schema: intermediate
+      +materialized: view
+    marts:
+      +schema: main
+      +materialized: table
+      +contract:
+        enforced: true

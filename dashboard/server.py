@@ -128,7 +128,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8501)
     args = parser.parse_args()
     if not args.db.is_file():
-        parser.error(f"Database missing: {args.db}. Run the CSV loader first.")
+        parser.error(f"Database missing: {args.db}. Run pipeline.run --csv first.")
     with DashboardServer(("127.0.0.1", args.port), args.db.resolve()) as server:
         print(f"Dashboard: http://127.0.0.1:{server.server_port}/", flush=True)
         try:

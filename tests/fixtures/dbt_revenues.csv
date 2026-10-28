@@ -1,0 +1,7 @@
+id,date,title,revenue,theaters,distributor
+a,2020-01-01,Same,100,10,Studio X
+b,2020-06-29,Same,80,,Studio X
+c,2020-06-29,Same,40,5,Studio Y
+d,2020-12-27,Same,60,3,Studio X
+e,2020-01-01,Other,25,2,Studio Z
+f,2021-01-01,Same,30,2,Studio Y

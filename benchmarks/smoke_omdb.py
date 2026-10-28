@@ -15,7 +15,8 @@ from pathlib import Path
 import duckdb
 
 from pipeline.enrich_omdb import MAX_DAILY_CAP, enrich, fetch_title, load_api_key
-from pipeline.load_revenues import ROOT, load
+from pipeline import ROOT
+from pipeline.run import rebuild
 
 RESULTS = ROOT / 'benchmarks/results'
 LIVE_DB = RESULTS / 'live_omdb.duckdb'
@@ -58,12 +59,12 @@ def main():
                 ['3', '2010-07-16', 'Inception', 800, 8, 'Test studio'],
                 ['4', '2019-07-19', 'The Lion King', 700, 7, 'Test studio'],
             ])
-        load(source, LIVE_DB)
+        rebuild(source, LIVE_DB)
     with duckdb.connect(str(LIVE_DB)) as con:
         # Keep request history durable, while forcing this invocation online.
         con.execute('DELETE FROM omdb_lookup')
         con.execute('DELETE FROM omdb_query_cache')
-        con.execute("UPDATE dim_movie SET match_status='pending'")
+        con.execute("UPDATE movie_metadata SET match_status='pending'")
     calls, lock = [], threading.Lock()
     active = peak = 0
 
@@ -85,7 +86,7 @@ def main():
         before = movies(con)
         facts = con.execute('SELECT count(*),sum(revenue),count(*) FILTER (WHERE theaters IS NULL) '
                             'FROM fact_daily_revenue').fetchone()
-        con.execute("UPDATE dim_movie SET match_status='pending'")
+        con.execute("UPDATE movie_metadata SET match_status='pending'")
 
     def offline_fetch(*_):
         raise AssertionError('Offline mode attempted a network request')

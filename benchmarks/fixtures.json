@@ -1,9 +1,0 @@
-{
-  "version": 1,
-  "base_year": 2020,
-  "duplicate_period_year": 2021,
-  "partial_cache_stride": 2,
-  "error_cycle": ["fallback", "not_found", "timeout", "invalid_payload", "different_title", "matched"],
-  "fatal_errors": {"invalid_key": "Invalid API key!", "quota_exhausted": "Request limit reached!"},
-  "payload": {"Response": "True", "Type": "movie", "Genre": "Drama", "imdbRating": "7.2", "Runtime": "100 min"}
-}

@@ -1,6 +1,4 @@
-CREATE SEQUENCE IF NOT EXISTS movie_key_seq START 1;
-CREATE SEQUENCE IF NOT EXISTS distributor_key_seq START 1;
-
+-- Input schema for the one-time migration test; never used by the running pipeline.
 CREATE TABLE IF NOT EXISTS raw_revenues (
     source_id VARCHAR PRIMARY KEY,
     revenue_date DATE NOT NULL,

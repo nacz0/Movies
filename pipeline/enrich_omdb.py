@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import re
@@ -19,7 +18,7 @@ from uuid import uuid4
 
 import duckdb
 
-from pipeline.load_revenues import ROOT
+from pipeline import ROOT
 
 MAX_DAILY_CAP = 900
 FATAL_STATUSES = {'invalid_key', 'quota_exhausted'}
@@ -122,7 +121,7 @@ def _save_response(con, movie_key: int, payload: dict, status: str, reason: str,
     if status == "matched":
         genre = str(payload.get("Genre", "")).split(",", 1)[0].strip()
         con.execute("""
-            UPDATE dim_movie SET match_status = 'matched', imdb_id = ?,
+            UPDATE movie_metadata SET match_status = 'matched', imdb_id = ?,
                 omdb_title = ?, release_year = ?, primary_genre = ?,
                 imdb_rating = ?, runtime_minutes = ? WHERE movie_key = ?
         """, [payload["imdbID"], payload["Title"], int(payload["Year"]),
@@ -130,7 +129,7 @@ def _save_response(con, movie_key: int, payload: dict, status: str, reason: str,
               _number(payload.get("imdbRating"), r"(\d+(?:\.\d+)?)", float),
               _number(payload.get("Runtime"), r"(\d+) min", int), movie_key])
     else:
-        con.execute("""UPDATE dim_movie SET match_status = ?, imdb_id = NULL,
+        con.execute("""UPDATE movie_metadata SET match_status = ?, imdb_id = NULL,
                     omdb_title = NULL, release_year = NULL, primary_genre = NULL,
                     imdb_rating = NULL, runtime_minutes = NULL WHERE movie_key = ?""",
                     [status, movie_key])
@@ -187,13 +186,12 @@ def _classification(result: FetchResult, candidate: Candidate) -> tuple[str, str
 
 def _candidates(con, retry_not_found, retry_ambiguous):
     rows = con.execute("""
-        SELECT m.movie_key, m.source_title,
-               year(m.run_start_date), year(m.run_end_date), sum(f.revenue)
-        FROM dim_movie m JOIN fact_daily_revenue f USING (movie_key)
+        SELECT m.movie_key, m.source_title, m.first_year, m.last_year, m.revenue
+        FROM intermediate.int_omdb_candidates m
         WHERE (? AND m.match_status = 'not_found')
            OR (? AND m.match_status = 'ambiguous')
            OR (NOT ? AND NOT ? AND m.match_status IN ('pending', 'retry_later'))
-        GROUP BY 1, 2, 3, 4 ORDER BY 5 DESC, 2, 1
+        ORDER BY 5 DESC, 2, 1
     """, [retry_not_found, retry_ambiguous, retry_not_found, retry_ambiguous]).fetchall()
     return [Candidate(*row[:4]) for row in rows]
 
@@ -202,7 +200,7 @@ def _upgrade_cache(con):
     cached_keys = set(con.execute('SELECT source_title, query_year FROM omdb_query_cache').fetchall())
     for title, year, response, fetched_at in con.execute("""
         SELECT m.source_title, coalesce(l.query_year, 0), l.response_json, l.fetched_at_utc
-        FROM omdb_lookup l JOIN dim_movie m USING (movie_key)
+        FROM omdb_lookup l JOIN movie_registry m USING (movie_key)
         WHERE l.response_json IS NOT NULL
           AND l.lookup_status IN ('matched', 'ambiguous', 'not_found')
         ORDER BY l.fetched_at_utc DESC, m.movie_key
@@ -325,7 +323,7 @@ def _save_period(con, candidate, result, query_year):
         if payload is not None:
             _save_response(con, candidate.movie_key, payload, status, reason, fetched_at, query_year)
         elif status == 'retry_later':
-            con.execute('UPDATE dim_movie SET match_status = ? WHERE movie_key = ?',
+            con.execute('UPDATE movie_metadata SET match_status = ? WHERE movie_key = ?',
                         [status, candidate.movie_key])
         con.execute('COMMIT')
     except BaseException:
@@ -336,7 +334,7 @@ def _save_period(con, candidate, result, query_year):
 def enrich(db_path: Path, api_key: str | None, *, limit: int = 2,
            daily_cap: int = MAX_DAILY_CAP, retry_not_found: bool = False,
            retry_ambiguous: bool = False, fetcher=fetch_title, workers: int = 1,
-           clock=_utcnow) -> dict:
+           clock=_utcnow, refresh: bool = True) -> dict:
     if not 1 <= limit <= MAX_DAILY_CAP or not 1 <= daily_cap <= MAX_DAILY_CAP:
         raise ValueError('limit and daily-cap must be between 1 and 900')
     if not isinstance(workers, int) or isinstance(workers, bool) or workers < 1:
@@ -347,7 +345,8 @@ def enrich(db_path: Path, api_key: str | None, *, limit: int = 2,
         raise ValueError('Choose either retry-not-found or retry-ambiguous')
     counts, period_statuses = Counter(), Counter()
     with duckdb.connect(str(db_path)) as con:
-        con.execute((ROOT / 'sql/omdb.sql').read_text(encoding='utf-8'))
+        from pipeline.state import migrate
+        migrate(con)
         candidates = iter(_candidates(con, retry_not_found, retry_ambiguous))
         _upgrade_cache(con)
         executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix='omdb')
@@ -393,27 +392,8 @@ def enrich(db_path: Path, api_key: str | None, *, limit: int = 2,
             # charged; completed period transactions are already durable.
             executor.shutdown(wait=True, cancel_futures=True)
         counts['requests_last_24h'] = coordinator.used_budget(coordinator.now())
+    if refresh:
+        from pipeline.dbt_runner import run_dbt
+        run_dbt(db_path, 'build', '--select', 'tag:marts')
     return dict(counts, request_statuses=dict(coordinator.request_statuses),
                 period_statuses=dict(period_statuses))
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db", type=Path, default=ROOT / "data/box_office.duckdb")
-    parser.add_argument("--limit", type=int, default=2)
-    parser.add_argument("--daily-cap", type=int, default=MAX_DAILY_CAP)
-    parser.add_argument("--workers", type=int, default=1, help="Maximum concurrent OMDb requests (default: 1)")
-    retry = parser.add_mutually_exclusive_group()
-    retry.add_argument("--retry-not-found", action="store_true")
-    retry.add_argument("--retry-ambiguous", action="store_true")
-    parser.add_argument("--offline", action="store_true", help="Reuse cache without API calls")
-    args = parser.parse_args()
-    print(json.dumps(enrich(args.db, None if args.offline else load_api_key(),
-                            limit=args.limit, daily_cap=args.daily_cap,
-                            workers=args.workers,
-                            retry_not_found=args.retry_not_found,
-                            retry_ambiguous=args.retry_ambiguous), indent=2))
-
-
-if __name__ == "__main__":
-    main()

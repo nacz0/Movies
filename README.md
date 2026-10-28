@@ -1,6 +1,6 @@
 # Daily box office ranking
 
-A local Python + DuckDB pipeline loads daily revenue from `revenues_per_day.csv`, enriches reporting periods with [OMDb](https://www.omdbapi.com/), and serves a ranking dashboard. Verified with Python 3.12.8 and DuckDB 1.5.1.
+A local Python + dbt Core + DuckDB pipeline loads daily revenue from `revenues_per_day.csv`, enriches reporting periods with [OMDb](https://www.omdbapi.com/), and serves a ranking dashboard. Python owns imports and durable OMDb state; dbt owns reporting periods and the analytical star schema. Uses Python 3.12, DuckDB 1.5.1, dbt Core 1.11.16 and dbt-duckdb 1.11.1.
 
 ![Box office ranking dashboard](docs/dashboard.png)
 
@@ -10,26 +10,79 @@ On Windows PowerShell:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m pipeline.load_revenues
+.\.venv\Scripts\python.exe -m pip install --only-binary=:all: -r requirements.txt
+.\.venv\Scripts\python.exe -m pipeline.run --csv revenues_per_day.csv
 Copy-Item .env.example .env
 ```
 
 Put your [free OMDb key](https://www.omdbapi.com/apikey.aspx) in `.env` as `OMDB_API_KEY=...`, then run:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pipeline.enrich_omdb --limit 100
+.\.venv\Scripts\python.exe -m pipeline.run --enrich --limit 100
 .\.venv\Scripts\python.exe -m dashboard.server
 ```
 
-Open [http://127.0.0.1:8501/](http://127.0.0.1:8501/). The default database is `data/box_office.duckdb`; both pipeline commands accept `--db`. The CSV loader also accepts `--csv`. Stop the dashboard before a command writes to the same database.
+Open [http://127.0.0.1:8501/](http://127.0.0.1:8501/). The default database is `data/box_office.duckdb`; all pipeline commands accept `--db`. Stop the dashboard before running the pipeline, including migration or recovery. Use `python -m pipeline.run` for imports, enrichment, full refresh and recovery.
 
-The database and `.env` are ignored by Git. Reimporting the same CSV retains matched periods, saved OMDb responses and the request history. `python -m pipeline.enrich_omdb --offline` reuses saved title responses for eligible periods without an API key or new requests.
+The database and `.env` are ignored by Git. Reimporting the same CSV retains matched periods, saved OMDb responses and the request history. `python -m pipeline.run --offline` reuses saved title responses for eligible periods without an API key or new requests. Running with neither `--enrich` nor `--offline` just rebuilds analytics from saved state; it does not call OMDb.
+
+The sequence is: copy the last published database → migrate operational state → validate/import an optional CSV → dbt staging and periods → check enriched assignments and synchronize stable keys → candidate model → optional enrichment → complete `dbt build` with tests → close connections and publish the file. A failed step stops publication. The pipeline uses one database writer and one publication lock, independently of HTTP worker count.
+
+## dbt configuration and development
+
+`requirements.txt` pins the complete runtime: dbt Core, its DuckDB adapter and DuckDB. Core 1.11 is used to avoid the additional experimental-parser build dependency in Core 1.12 on Windows. Versions and adapter requirements can be checked on [PyPI](https://pypi.org/project/dbt-duckdb/1.11.1/) and [dbt Core](https://pypi.org/project/dbt-core/1.11.16/).
+
+The runner creates a temporary profile from `dbt/profiles.yml.example`, always passing an absolute database path. It supports `dev` and `ci`, with isolated per-file build artifacts under `dbt/target/` and `dbt/logs/`. Both targets use the explicitly supplied file; the CI workflow passes temporary databases and never reads the user database. For a development file:
+
+```powershell
+.\.venv\Scripts\python.exe -m pipeline.run --csv revenues_per_day.csv --db data/dev.duckdb
+.\.venv\Scripts\python.exe -m pipeline.run --db data/dev.duckdb --full-refresh
+```
+
+For direct dbt inspection, first build a development file as above, then create a local ignored profile:
+
+```powershell
+Copy-Item dbt/profiles.yml.example dbt/profiles.yml
+$env:MOVIES_DBT_PATH = (Resolve-Path data/dev.duckdb).Path
+$env:DBT_SEND_ANONYMOUS_USAGE_STATS = 'false'
+.\.venv\Scripts\dbt.exe debug --project-dir dbt --profiles-dir dbt
+.\.venv\Scripts\dbt.exe parse --project-dir dbt --profiles-dir dbt
+.\.venv\Scripts\dbt.exe build --project-dir dbt --profiles-dir dbt --full-refresh
+.\.venv\Scripts\dbt.exe docs generate --project-dir dbt --profiles-dir dbt
+```
+
+Use `pipeline.run` when CSV data changes: it synchronizes operational registries before the final build. Direct dbt rebuilds assume this synchronization has already succeeded. Generated documentation is in `dbt/target/index.html` for direct commands; runner-generated files are under a path-specific subdirectory.
+
+Python-owned sources and registries live in `main`. Staging views live in `staging`; intermediate views and reused period tables in `intermediate`; the four materialized marts retain their original names in `main`. The schema macro deliberately omits dbt's usual target-schema prefix. Local relation references omit the catalog so file copies can be renamed safely. Dashboard queries require no changes.
+
+## Migration and recovery
+
+The first pipeline run migrates a working copy of an existing database transactionally. It preserves numeric keys, selected metadata and statuses (including statuses without payloads), lookup responses, query cache and request history. `omdb_lookup` and any local review/search tables referring to `dim_movie` are reattached to `movie_registry`. Historical dates, distributors and periods remain available even after source deletions. The input schema for migration tests lives only in `tests/fixtures/pre_dbt.sql`.
+
+`movie_registry`, `distributor_registry`, `date_registry`, `movie_metadata`, `revenue_assignments`, `import_history` and `pipeline_migrations` are durable operational tables; dbt never replaces them, even during full refresh. Empty snapshots are rejected. Revenue corrections and deletions replace the current facts, but changing a saved enriched row's title or period start is rejected before publication.
+
+For `data/box_office.duckdb`, the working copy is `data/box_office.working.duckdb`; each successful publication first saves the previous database as `data/box_office.duckdb.backup.duckdb`. A failure retains the working copy, including every request reservation and cached response. Resume the same run:
+
+```powershell
+.\.venv\Scripts\python.exe -m pipeline.run --db data/box_office.duckdb --resume --offline
+```
+
+Add `--csv revenues_per_day.csv` when retrying a corrected import. Omit `--offline` to publish only the saved state, or use `--enrich` to continue subject to the retained rolling budget. A new run refuses to overwrite unfinished work. Keep working databases and their journals until recovery is complete.
+
+To restore the last published backup, with the dashboard stopped:
+
+```powershell
+.\.venv\Scripts\python.exe -m pipeline.run --db data/box_office.duckdb --restore
+```
+
+Use `--backup <path>` for another saved database. Recovery carries request reservations and the newest query cache forward from both the active file and unfinished work, rebuilds and validates the backup, then publishes it. An unfinished working file is retained as `box_office.failed-<id>.duckdb`. Copying an old backup over the active file manually can lose spent API budget; use this recovery command instead. If recovery itself fails, retain the `.restoring.duckdb` candidate for investigation before retrying.
+
+The adjacent `.pipeline.lock` prevents two pipeline publishers. After a forced process termination, first ensure no pipeline process or dashboard is running, then remove only that stale lock and resume. DuckDB file locks remain a separate check. No API requests are needed for migration, full refresh, or recovery.
 
 Enrichment uses one worker by default. To allow up to four simultaneous OMDb requests:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pipeline.enrich_omdb --workers 4 --limit 100
+.\.venv\Scripts\python.exe -m pipeline.run --enrich --workers 4 --limit 100
 ```
 
 Run one enrichment process at a time. Run and daily request limits still apply, including fallbacks, timeouts and interrupted requests. An invalid key or exhausted quota stops new requests; calls already in flight may finish. With a small budget, worker count can affect which periods get processed before the limit is reached.
@@ -37,18 +90,10 @@ Run one enrichment process at a time. Run and daily request limits still apply, 
 To revisit ambiguous periods, stop the dashboard and run:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pipeline.enrich_omdb --retry-ambiguous --limit 100
+.\.venv\Scripts\python.exe -m pipeline.run --enrich --retry-ambiguous --limit 100
 ```
 
 When a title-only response has an incompatible release year, the pipeline makes one additional query using the year of the first revenue record. The same matching rules still apply. Each network request counts toward both `--limit` and the daily cap. If the fallback is unavailable, unsuccessful or uncertain, the period stays `ambiguous`; rerun with `--retry-ambiguous` after a limit or temporary error. Cached results can also be reviewed with `--retry-ambiguous --offline`.
-
-## Enrichment performance
-
-- **Faster metadata updates:** four workers reduced median enrichment time from **6.80 s to 1.93 s (3.52×, 72% less waiting)** in a controlled test of 24 titles at 200 ms per response, with one warmup and five measured runs. Actual OMDb times depend on the service.
-- **The same API allowance:** concurrency shortens processing time; the daily cap stays unchanged. Shared responses and saved cache avoid spending requests repeatedly on the same title.
-- **Consistent analysis:** matching rules and revenue totals were preserved. All 29 tests and 24 comparisons of business data with the original implementation passed. Reimport time was effectively unchanged.
-
-A live OMDb check on **19 October 2026** matched **four reporting periods for three films using four requests**, with up to three requests in parallel. One request served both *The Matrix* periods; a year fallback selected *The Lion King (2019)*. Reprocessing offline reproduced the same matches with **zero new requests**. This confirms the integration works on a small sample; the main database was unchanged.
 
 ## Data and model
 
@@ -130,14 +175,16 @@ The following observations use all revenue records in the fact table, regardless
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-The import checks required fields, duplicate IDs and duplicate date/title/distributor groups, then reconciles fact count, total revenue and missing theater counts with the CSV in one transaction. Reloads preserve saved OMDb responses and reject a change that moves already-enriched source rows to a different reporting period. OMDb metadata is user-maintained and title matching can be wrong, so ambiguous periods remain separate.
+The import checks required fields, duplicate IDs and duplicate date/title/distributor groups in a transaction. dbt then checks contracts, unique and required keys, dimension relationships, match statuses, valid revenue/theater values, row-by-row equality and totals grouped by date, title and distributor. The whole pipeline publishes a validated working database; a `dbt build` is not treated as one global transaction. Reloads preserve saved OMDb responses and reject a change that moves already-enriched source rows to a different reporting period. OMDb metadata is user-maintained and title matching can be wrong, so ambiguous periods remain separate.
 
-To reproduce the network-free measurements and data comparison:
+The CI workflow runs the Python and dbt integration tests on Windows and Linux using Python 3.12, a small checked-in CSV and fixture OMDb responses, without network calls to OMDb or secrets. It covers migration rollback/idempotency, 180/181-day boundaries, multiple distributors, corrections/deletions, empty CSV rejection, full refresh, dashboard queries, failed publication, retained request budget and recovery.
+
+For local validation against the complete CSV and an optional existing database (only a copy is migrated):
 
 ```powershell
-.\.venv\Scripts\python.exe -m benchmarks.benchmark_pipeline --revision ad01f37 --workers 1 --output benchmarks/results/baseline.json
-.\.venv\Scripts\python.exe -m benchmarks.benchmark_pipeline --workers 1 2 4 8 --output benchmarks/results/concurrency.json
-.\.venv\Scripts\python.exe -m benchmarks.verify_equivalence
+.\.venv\Scripts\python.exe -m benchmarks.verify_dbt --db-snapshot data/box_office.duckdb
 ```
+
+Each validation needs a new output directory; pass `--output-dir benchmarks/results/dbt-validation-new` for another run. dbt reconciles the CSV through its data tests. The verifier checks repeated full refresh, stable numeric keys, saved operational tables, column types and dashboard results. With `--db-snapshot`, it migrates a copy and verifies that keys and API state survive. This verification generates dbt documentation and never calls OMDb. It uses only the current dbt pipeline and does not load code from Git history.
 
 Raw results stay local in the Git-ignored `benchmarks/results/`. The optional `python -m benchmarks.smoke_omdb` uses the configured key for a live check, with a shared maximum of four requests per rolling 24 hours. Its request ledger stays in `benchmarks/results/live_omdb.duckdb`; retain it so repeat runs respect the budget.

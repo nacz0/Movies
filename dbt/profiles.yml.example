@@ -1,0 +1,10 @@
+movies:
+  target: "{{ env_var('MOVIES_DBT_TARGET', 'dev') }}"
+  outputs:
+    dev: &connection
+      type: duckdb
+      path: "{{ env_var('MOVIES_DBT_PATH') }}"
+      schema: main
+      threads: 1
+    ci:
+      <<: *connection

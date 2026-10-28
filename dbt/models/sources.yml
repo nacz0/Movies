@@ -1,0 +1,34 @@
+version: 2
+sources:
+  - name: operational
+    schema: main
+    description: Python-owned persistent state. Never replaced by dbt or full-refresh.
+    tables:
+      - name: raw_revenues
+        description: Validated CSV snapshot; one row per source_id. Nominal USD domestic gross (US/Canada), inferred from dataset.
+        columns:
+          - name: source_id
+            data_tests: [unique, not_null]
+          - name: revenue_date
+            data_tests: [not_null]
+          - name: source_title
+            data_tests: [not_null]
+          - name: distributor_name
+            data_tests: [not_null]
+          - name: revenue
+            description: Additive ticket gross in nominal USD, not distributor profit.
+            data_tests: [not_null]
+          - name: theaters
+            description: Row-level reported theaters, nullable; not additive across rows.
+      - name: movie_registry
+        description: Stable sequence keys by exact source title and period start. Includes historical periods without facts.
+      - name: distributor_registry
+        description: Stable sequence keys by exact distributor name, including historical values.
+      - name: date_registry
+        description: All dates ever successfully imported; preserves existing filter bounds.
+      - name: movie_metadata
+        description: Persistent match status and selected metadata, including retries without a response.
+      - name: omdb_lookup
+        description: Selected payload and classification, referencing movie_registry rather than marts.
+      - name: revenue_assignments
+        description: Source-to-period assignment at the last successful import; guards enriched periods.

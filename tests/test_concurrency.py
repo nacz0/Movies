@@ -11,8 +11,9 @@ from unittest.mock import patch
 
 import duckdb
 
+from pipeline.run import rebuild
+
 from pipeline.enrich_omdb import OmdbHttpError, _save_response, enrich
-from pipeline.load_revenues import load
 
 
 def movie(title, year=2020):
@@ -36,7 +37,7 @@ class ConcurrencyTests(unittest.TestCase):
             writer.writerow(['id', 'date', 'title', 'revenue', 'theaters', 'distributor'])
             for i, (title, date) in enumerate(entries):
                 writer.writerow([str(i), date, title, 1000 - i, '' if i == 0 else 10, 'Studio'])
-        load(source, self.db)
+        rebuild(source, self.db)
 
     def query(self, sql, args=None):
         with duckdb.connect(str(self.db)) as con:
@@ -128,7 +129,7 @@ class ConcurrencyTests(unittest.TestCase):
         # the last slot; the fallback remains eligible for a later retry.
         self.query("DELETE FROM omdb_query_cache")
         self.query("DELETE FROM omdb_lookup")
-        self.query("UPDATE dim_movie SET match_status='pending'")
+        self.query("UPDATE movie_metadata SET match_status='pending'")
         calls.clear()
         enrich(self.db, 'fixture', workers=2, limit=2, fetcher=fetch)
         self.assertEqual(Counter(calls), Counter([('Film 0', None), ('Film 1', None)]))
@@ -184,12 +185,12 @@ class ConcurrencyTests(unittest.TestCase):
         calls = []
         self.run_enrich(lambda title, *_: calls.append(title) or movie(title), retry_not_found=True)
         self.assertEqual(calls, ['Same', 'Same'])
-        self.query("UPDATE dim_movie SET match_status='ambiguous'")
+        self.query("UPDATE movie_metadata SET match_status='ambiguous'")
         result = enrich(self.db, None, workers=8, retry_ambiguous=True,
                         fetcher=lambda *_: self.fail('offline network'))
         self.assertEqual(result.get('requests', 0), 0)
         self.assertEqual(result['cache_reused'], 2)
-        self.query("UPDATE dim_movie SET match_status='not_found'")
+        self.query("UPDATE movie_metadata SET match_status='not_found'")
         result = enrich(self.db, None, workers=8, retry_not_found=True,
                         fetcher=lambda *_: self.fail('offline network'))
         self.assertEqual(result.get('cache_reused', 0), 0)
@@ -261,8 +262,9 @@ class ConcurrencyTests(unittest.TestCase):
             return movie(title)
         with self.assertRaises(KeyboardInterrupt):
             enrich(self.db, 'fixture', workers=1, limit=8, fetcher=fetch, clock=lambda: self.now)
-        self.assertEqual(self.query("SELECT request_status FROM omdb_request_log ORDER BY movie_key"),
-                         [('matched',), ('reserved',)])
+        self.assertEqual(self.query("SELECT m.source_title,l.request_status FROM omdb_request_log l "
+                                    "JOIN movie_registry m USING (movie_key) ORDER BY m.source_title"),
+                         [('Film 0', 'matched'), ('Film 1', 'reserved')])
         result = enrich(self.db, 'fixture', workers=4, limit=8, daily_cap=3,
                         fetcher=lambda title, *_: movie(title), clock=lambda: self.now)
         self.assertEqual(result['requests'], 1)

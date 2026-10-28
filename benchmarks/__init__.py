@@ -1,1 +1,1 @@
-"""Repeatable, network-free pipeline benchmarks."""
+"""Local verification and optional OMDb smoke checks for the dbt pipeline."""

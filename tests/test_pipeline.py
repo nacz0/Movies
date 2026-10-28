@@ -8,9 +8,10 @@ from urllib.parse import parse_qs, urlsplit
 
 import duckdb
 
+from pipeline.run import rebuild
+
 from dashboard.queries import distributor_ranking, film_ranking, movie_ranking, overview
 from pipeline.enrich_omdb import enrich, fetch_title
-from pipeline.load_revenues import load
 
 
 class PipelineTests(unittest.TestCase):
@@ -32,18 +33,18 @@ class PipelineTests(unittest.TestCase):
             writer.writerows(rows)
 
     def test_import_reconciles_and_rolls_back_invalid_csv(self):
-        summary = load(self.csv, self.db)
+        summary = rebuild(self.csv, self.db)
         self.assertEqual((summary["fact_rows"], summary["periods"], summary["total_revenue"]),
                          (3, 3, 175))
         self.write_rows([["4", "2022-01-01", "Bad", "-1", "1", "Studio X"]])
         with self.assertRaises(ValueError):
-            load(self.csv, self.db)
+            rebuild(self.csv, self.db)
         with duckdb.connect(str(self.db)) as con:
             self.assertEqual(con.execute("SELECT count(*), sum(revenue) FROM fact_daily_revenue").fetchone(),
                              (3, 175))
 
     def test_saved_response_survives_reload_and_combines_periods(self):
-        load(self.csv, self.db)
+        rebuild(self.csv, self.db)
         payload = {
             "Response": "True", "Type": "movie", "Title": "Film A",
             "Year": "2020", "imdbID": "tt1234567", "Genre": "Drama",
@@ -54,13 +55,13 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result["cache_reused"], 1)
         with duckdb.connect(str(self.db)) as con:
             saved = con.execute("SELECT movie_key, response_json FROM omdb_lookup ORDER BY movie_key").fetchall()
-        load(self.csv, self.db)
+        rebuild(self.csv, self.db)
         with duckdb.connect(str(self.db)) as con:
             self.assertEqual(con.execute(
                 "SELECT movie_key, response_json FROM omdb_lookup ORDER BY movie_key"
             ).fetchall(), saved)
             self.assertEqual(con.execute("SELECT count(*) FROM omdb_request_log").fetchone()[0], 1)
-            con.execute("UPDATE dim_movie SET match_status = 'pending' WHERE source_title = 'Film A'")
+            con.execute("UPDATE movie_metadata SET match_status = 'pending' WHERE movie_key IN (SELECT movie_key FROM movie_registry WHERE source_title = 'Film A')")
         offline = enrich(self.db, None, limit=1, fetcher=lambda *_: self.fail("network called"))
         self.assertEqual(offline["cache_reused"], 2)
         with duckdb.connect(str(self.db)) as con:
@@ -73,7 +74,7 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(sum(row["revenue"] for row in movie_ranking(con, start, end)), 175)
 
     def test_invalid_key_stops_without_spending_more_requests(self):
-        load(self.csv, self.db)
+        rebuild(self.csv, self.db)
         invalid = {"Response": "False", "Error": "Invalid API key!"}
         result = enrich(self.db, "bad-key", limit=10, fetcher=lambda *_: invalid)
         self.assertEqual((result["requests"], result["invalid_key"]), (1, 1))
@@ -84,7 +85,7 @@ class PipelineTests(unittest.TestCase):
             ).fetchone()[0], 3)
 
     def test_sorting_happens_before_ranking_limit(self):
-        load(self.csv, self.db)
+        rebuild(self.csv, self.db)
         with duckdb.connect(str(self.db)) as con:
             start, end = date(2020, 1, 1), date(2021, 1, 2)
             self.assertEqual(movie_ranking(con, start, end, limit=1)[0]["revenue"], 100)
@@ -101,7 +102,7 @@ class PipelineTests(unittest.TestCase):
             ['1', '2019-07-19', 'The Lion King', '100', '10', 'Studio X'],
             ['2', '2020-08-01', 'The Lion King', '50', '8', 'Studio X'],
         ])
-        load(self.csv, self.db)
+        rebuild(self.csv, self.db)
 
     @staticmethod
     def lion(year, title='The Lion King'):
@@ -133,7 +134,7 @@ class PipelineTests(unittest.TestCase):
             ).fetchall(), [(2019,), (2020,)])
             self.assertEqual(con.execute('SELECT query_year FROM omdb_query_cache ORDER BY 1').fetchall(),
                              [(0,), (2019,), (2020,)])
-            con.execute("UPDATE dim_movie SET match_status='pending'")
+            con.execute("UPDATE movie_metadata SET match_status='pending'")
         result = enrich(self.db, None, fetcher=lambda *_: self.fail('Network called'))
         self.assertEqual(result['cache_reused'], 4)
         with duckdb.connect(str(self.db)) as con:
@@ -189,7 +190,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result['requests'], 2)
         self.assertEqual(result['invalid_key'], 1)
 
-    def test_legacy_cache_upgrade_reuses_title_response(self):
+    def test_cache_upgrade_reuses_title_response(self):
         self.prepare_remakes()
         enrich(self.db, 'test-key', limit=1, fetcher=lambda *_: self.lion(1994))
         with duckdb.connect(str(self.db)) as con:
