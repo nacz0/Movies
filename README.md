@@ -57,6 +57,75 @@ python -m tests.verify_full --db data/full-check.duckdb
 
 `.env`, keys, databases, journals and generated dbt output are ignored by Git. The dashboard's only change from `main` is its default database filename; filters, sorting, rankings and both CSV downloads retain the existing implementation.
 
+## Airflow 3 in WSL2
+
+The version-controlled DAG is `dags/movies_steps.py`. Airflow and Movies keep separate
+virtual environments: Airflow imports only its SDK and standard provider; each task
+executes `/home/nacho/projects/Movies/.venv/bin/python -m pipeline.steps` in the Movies
+repository. No Airflow packages are needed in the Movies environment. Airflow needs
+`apache-airflow-providers-standard` (included in the tested installation).
+
+In Ubuntu, first update `/home/nacho/projects/Movies` to this implementation on
+`simplified-dbt`, then install the link and check parsing:
+
+```bash
+cd /home/nacho/projects/Movies
+.venv/bin/python -m pip install -r requirements.txt
+bash scripts/install_airflow_dag.sh
+/home/nacho/airflow/.venv/bin/python -m tests.verify_airflow
+/home/nacho/airflow/.venv/bin/airflow dags list --local
+```
+
+The installer links only `movies_steps.py` into `/home/nacho/airflow/dags` and refuses
+to replace a different existing file. Re-running it is safe; source edits are visible
+through the link. `hello_movies` and `movies_local` are unchanged. The DAG expects
+the repository at `/home/nacho/projects/Movies`; edit `MOVIES_REPO` in the DAG if moved.
+
+With your existing Airflow services running, wait for `movies_steps` to appear, then
+unpause and trigger it in the UI, or use:
+
+```bash
+/home/nacho/airflow/.venv/bin/airflow dags unpause movies_steps
+/home/nacho/airflow/.venv/bin/airflow dags trigger movies_steps
+# Optional local execution without the scheduler (executes real tasks):
+/home/nacho/airflow/.venv/bin/python -m tests.verify_airflow --run
+# Isolated failing-ingest check; confirms four downstream tasks never start:
+/home/nacho/airflow/.venv/bin/python -m tests.verify_airflow --failure
+```
+
+| Task, in order | Operation |
+| --- | --- |
+| `ingest` | Validate `revenues_per_day.csv` and atomically import it with `import_snapshot` |
+| `dbt_prepare` | `run_dbt(..., 'run', '--select', '+int_omdb_candidates')` builds reporting periods and enrichment candidates |
+| `enrich_omdb` | Existing `enrich` worker/cache logic, with no key and both HTTP budgets set to zero |
+| `dbt_build` | Complete `run_dbt(..., 'build')`, including dbt data and unit tests |
+| `validate` | Read-only checks: 337,818 facts, revenue 205,110,995,141, 6,661 periods, source reconciliation and zero OMDb reservations |
+
+All tasks use **`data/movies_steps.duckdb`**, leaving other Movies databases untouched.
+Enrichment is offline even if `OMDB_API_KEY` is set; no key is loaded from `.env`.
+The full bundled CSV is required for the final acceptance counts. Each stage can
+also be run manually, for example `.venv/bin/python -m pipeline.steps validate`.
+
+The DAG is manual (`schedule=None`, `catchup=False`). One active run, one active task
+and the strict `ingest >> dbt_prepare >> enrich_omdb >> dbt_build >> validate` chain
+serialize writes. Do not run manual pipeline commands, a second DAG or a dashboard
+against this same database while the DAG is running.
+
+Each dbt task allows two retries after the initial attempt, with a one-minute delay
+and exponential backoff, and a 30-minute timeout per attempt. Other tasks have no
+automatic retries and a 10-minute timeout. A nonzero process exit fails its task;
+downstream tasks wait for success and become `upstream_failed` after retries are
+exhausted. Fix the cause, then clear the failed task and its downstream tasks in the
+UI to retry. Saved raw/cache state survives; dbt builds are not atomic, so wait for a
+successful build before serving the database.
+
+Open **Dags → movies_steps → run → task → Logs** to inspect start messages, JSON
+results and failure tracebacks. dbt failure output is included; its detailed logs
+also live under `dbt/logs/` in a database-specific subdirectory. Task output stays
+in logs; XCom pushes are disabled.
+
+See [executed Airflow validation](docs/airflow-validation.md) for results and limits.
+
 ## Responsibilities and lineage
 
 | Component | Owns |
