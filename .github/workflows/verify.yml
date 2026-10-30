@@ -36,14 +36,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      AIRFLOW_VENV: ${{ runner.temp }}/airflow-venv
-      AIRFLOW_HOME: ${{ runner.temp }}/airflow-home
       AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Configure isolated Airflow paths
+        run: |
+          echo "AIRFLOW_VENV=$RUNNER_TEMP/airflow-venv" >> "$GITHUB_ENV"
+          echo "AIRFLOW_HOME=$RUNNER_TEMP/airflow-home" >> "$GITHUB_ENV"
       - name: Install isolated Airflow environment
         run: |
           python -m venv "$AIRFLOW_VENV"
