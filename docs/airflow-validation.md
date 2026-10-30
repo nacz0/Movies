@@ -1,5 +1,34 @@
 # Airflow integration validation
 
+## CI DAG validation
+
+The separate Ubuntu job in `.github/workflows/verify.yml` uses Python 3.12 and
+installs Apache Airflow 3.3.2 in its own virtual environment with the official
+Python 3.12 constraints. It runs `python -m tests.verify_airflow` without flags,
+checking imports, task dependencies, retries, execution timeouts, and DAG/task
+configuration. An import error or failed assertion exits nonzero and fails the job.
+It does not execute tasks, call `dag.test()`, or process the Movies dataset. No
+Movies dependencies, API keys, GCP credentials, or Airflow database migration are
+needed.
+
+To reproduce from the repository root on Linux or WSL with Python 3.12:
+
+```bash
+airflow_check_dir="$(mktemp -d)"
+export AIRFLOW_HOME="$airflow_check_dir/home"
+export AIRFLOW__CORE__LOAD_EXAMPLES=false
+python3.12 -m venv "$airflow_check_dir/venv"
+"$airflow_check_dir/venv/bin/python" -m pip install "apache-airflow==3.3.2" \
+  --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-3.3.2/constraints-3.12.txt"
+"$airflow_check_dir/venv/bin/python" -m tests.verify_airflow
+```
+
+Expected output includes `DAG parse and configuration checks passed`; the command
+exits with status 0. Keep `--run` and `--failure` out of CI because they execute
+tasks.
+
+## Previous full local integration validation
+
 Executed on 2026-10-29 in WSL2 Ubuntu, on `simplified-dbt`, using the installed
 Airflow 3.3.2 environment at `/home/nacho/airflow/.venv` and the separate Movies
 environment at `/home/nacho/projects/Movies/.venv`. No dependencies were installed

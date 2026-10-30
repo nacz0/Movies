@@ -31,3 +31,24 @@ jobs:
           path: |
             dbt/logs/
             dbt/target/
+  airflow:
+    name: Airflow 3 DAG validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      AIRFLOW_VENV: ${{ runner.temp }}/airflow-venv
+      AIRFLOW_HOME: ${{ runner.temp }}/airflow-home
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated Airflow environment
+        run: |
+          python -m venv "$AIRFLOW_VENV"
+          "$AIRFLOW_VENV/bin/python" -m pip install "apache-airflow==3.3.2" \
+            --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-3.3.2/constraints-3.12.txt"
+      - name: Validate DAG imports and configuration
+        # No --run or --failure: validate definitions without executing tasks.
+        run: '"$AIRFLOW_VENV/bin/python" -m tests.verify_airflow'
